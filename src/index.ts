@@ -8,13 +8,13 @@ import { runSchedulerTick } from "./scheduler/tick.js";
 const config = loadConfig();
 console.log("config_loaded", {
   publicBaseUrl: config.publicBaseUrl,
-  adminCount: config.adminUserIds.length,
+  maxSendsPerTick: config.maxSendsPerTick,
 });
 
 const app = express();
 app.use(express.json());
 
-const botState: BotState = { lastAdminSendAt: null };
+const botState: BotState = { lastSendByUserId: new Map() };
 const { bot, sendChartToChat } = createBot(prisma, config, botState);
 
 app.get("/health", (_req: Request, res: Response) => {
@@ -31,7 +31,7 @@ const port = Number(process.env.PORT) || 3000;
 const start = async () => {
   await bot.api.setWebhook(`${config.publicBaseUrl}/telegram/webhook`);
 
-  const schedulerState = { inMemoryLock: false };
+  const schedulerState = { isTickRunning: false };
   const tick = async () => {
     await runSchedulerTick(prisma, config, { sendChartToChat }, schedulerState);
   };
@@ -41,12 +41,12 @@ const start = async () => {
   if (config.sendOnDeploy) {
     const buffer = await captureRadarChart();
     const caption = `Cloudflare Radar 🇮🇷`;
-    const targets = await prisma.target.findMany({ where: { isEnabled: true } });
+    const targets = await prisma.targetChat.findMany({ where: { isEnabled: true } });
     if (!targets.length) {
       console.log("send_on_deploy_skipped", { reason: "no_targets" });
     }
     for (const target of targets) {
-      await sendChartToChat(target.tgChatId, caption, buffer);
+      await sendChartToChat(target.chatId, caption, buffer);
     }
   }
 

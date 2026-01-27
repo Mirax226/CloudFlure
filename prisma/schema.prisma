@@ -7,43 +7,58 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-enum JobStatus {
+model User {
+  id               Int         @id @default(autoincrement())
+  tgUserId         BigInt      @unique
+  privateChatId    BigInt?
+  selectedTargetId Int?
+  selectedTarget   TargetChat? @relation("UserSelectedTarget", fields: [selectedTargetId], references: [id])
+  targetsCreated   TargetChat[] @relation("UserCreatedTargets")
+  createdAt        DateTime    @default(now())
+  updatedAt        DateTime    @updatedAt
+}
+
+enum TargetChatType {
+  CHANNEL
+  GROUP
+  SUPERGROUP
+}
+
+model TargetChat {
+  id              Int            @id @default(autoincrement())
+  chatId          BigInt         @unique
+  title           String?
+  type            TargetChatType
+  createdByUserId Int
+  createdByUser   User           @relation("UserCreatedTargets", fields: [createdByUserId], references: [id])
+  selectedByUsers User[]         @relation("UserSelectedTarget")
+  isEnabled       Boolean        @default(true)
+  schedule        TargetSchedule?
+  sendLogs        SendLog[]
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+}
+
+model TargetSchedule {
+  id              Int       @id @default(autoincrement())
+  targetChatId    Int       @unique
+  targetChat      TargetChat @relation(fields: [targetChatId], references: [id])
+  intervalMinutes Int
+  lastSentAt      DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+}
+
+enum SendStatus {
   SUCCESS
   FAIL
 }
 
-model User {
-  id         Int      @id @default(autoincrement())
-  tgUserId   BigInt   @unique
-  tgChatId   BigInt
-  isActive   Boolean  @default(false)
-  sendHour   Int?
-  sendMinute Int?
-  createdAt  DateTime @default(now())
-  updatedAt  DateTime @updatedAt
-}
-
-model Target {
-  id              Int      @id @default(autoincrement())
-  tgChatId         BigInt   @unique
-  name            String?
-  isEnabled       Boolean  @default(true)
-  intervalMinutes Int
-  lastSentAt      DateTime?
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
-}
-
-model JobLog {
-  id          Int       @id @default(autoincrement())
-  runAt       DateTime
-  status      JobStatus
-  error       String?
-  targetCount Int
-}
-
-model State {
-  key       String   @id
-  value     String
-  updatedAt DateTime @updatedAt
+model SendLog {
+  id           Int       @id @default(autoincrement())
+  targetChatId Int
+  targetChat   TargetChat @relation(fields: [targetChatId], references: [id])
+  sentAt       DateTime
+  status       SendStatus
+  error        String?
 }

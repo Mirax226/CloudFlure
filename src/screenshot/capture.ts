@@ -1,30 +1,20 @@
-import { chromium, type Route } from "playwright";
+import { chromium } from "playwright";
 
 const RADAR_URL = "https://radar.cloudflare.com/ir?dateRange=1d";
-
-const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export const captureRadarChart = async (): Promise<Buffer> => {
   const browser = await chromium.launch({ headless: true });
   const context = await browser.newContext({ viewport: { width: 1365, height: 768 } });
 
   const page = await context.newPage();
-  await page.route("**/*", (route: Route) => {
-    const resourceType = route.request().resourceType();
-    if (resourceType === "font" || resourceType === "image") {
-      return route.abort();
-    }
-    return route.continue();
-  });
 
   await page.goto(RADAR_URL, { waitUntil: "networkidle" });
-  await delay(1500);
+  await page.waitForTimeout(3000);
 
   const selectors = [
-    "main", 
-    "section", 
-    "#app",
-    "body",
+    "main section:has(canvas)",
+    "main [data-testid*='chart']",
+    "main [class*='chart']",
   ];
 
   for (const selector of selectors) {
@@ -41,6 +31,17 @@ export const captureRadarChart = async (): Promise<Buffer> => {
     } catch {
       // continue to fallback
     }
+  }
+
+  const fallbackLocator = page.locator("main").first();
+  try {
+    if (await fallbackLocator.count()) {
+      const buffer = await fallbackLocator.screenshot({ type: "png" });
+      await browser.close();
+      return buffer;
+    }
+  } catch {
+    // ignore fallback errors
   }
 
   const buffer = await page.screenshot({ type: "png", fullPage: true });

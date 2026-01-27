@@ -6,11 +6,10 @@ type EnvConfig = {
   botToken: string;
   publicBaseUrl: string;
   databaseUrl: string;
-  channelChatId?: number;
-  adminUserIds: number[];
   defaultTimezone: string;
   sendOnDeploy: boolean;
   screenshotCooldownSec: number;
+  maxSendsPerTick: number;
 };
 
 const requireEnv = (key: string): string => {
@@ -29,13 +28,6 @@ const parseNumber = (value: string, key: string): number => {
   return parsed;
 };
 
-const parseOptionalNumber = (value: string | undefined, key: string): number | undefined => {
-  if (!value) {
-    return undefined;
-  }
-  return parseNumber(value, key);
-};
-
 const parseBoolean = (value: string): boolean => {
   return value.toLowerCase() === "true";
 };
@@ -44,28 +36,25 @@ export const loadConfig = (): EnvConfig => {
   const botToken = requireEnv("BOT_TOKEN");
   const publicBaseUrl = requireEnv("PUBLIC_BASE_URL");
   const databaseUrl = requireEnv("DATABASE_URL");
-  const channelChatId = parseOptionalNumber(process.env.CHANNEL_CHAT_ID, "CHANNEL_CHAT_ID");
-  const adminUserIds = requireEnv("ADMIN_USER_IDS")
-    .split(",")
-    .map((id) => id.trim())
-    .filter(Boolean)
-    .map((id) => parseNumber(id, "ADMIN_USER_IDS"));
   const defaultTimezone = process.env.DEFAULT_TIMEZONE ?? "Asia/Baku";
   const sendOnDeploy = parseBoolean(process.env.SEND_ON_DEPLOY ?? "false");
   const screenshotCooldownSec = parseNumber(
     process.env.SCREENSHOT_COOLDOWN_SEC ?? "30",
     "SCREENSHOT_COOLDOWN_SEC"
   );
+  const maxSendsPerTick = parseNumber(
+    process.env.MAX_SENDS_PER_TICK ?? "20",
+    "MAX_SENDS_PER_TICK"
+  );
 
   return {
     botToken,
     publicBaseUrl,
     databaseUrl,
-    channelChatId,
-    adminUserIds,
     defaultTimezone,
     sendOnDeploy,
     screenshotCooldownSec,
+    maxSendsPerTick,
   };
 };
 
