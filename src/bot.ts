@@ -31,20 +31,9 @@ export const createBot = (prisma: PrismaClient, config: EnvConfig, state: BotSta
     })
   );
 
-  const sendChartToTargets = async (
-    userChatId: bigint,
-    caption: string,
-    buffer: Buffer
-  ) => {
-    const channelPhoto = new InputFile(buffer, "radar.png");
-    const userPhoto = new InputFile(buffer, "radar.png");
-    await bot.api.sendPhoto(config.channelChatId, channelPhoto, { caption });
-    await bot.api.sendPhoto(Number(userChatId), userPhoto, { caption });
-  };
-
-  const sendChartToChannel = async (caption: string, buffer: Buffer) => {
+  const sendChartToChat = async (chatId: bigint | number, caption: string, buffer: Buffer) => {
     const photo = new InputFile(buffer, "radar.png");
-    await bot.api.sendPhoto(config.channelChatId, photo, { caption });
+    await bot.api.sendPhoto(Number(chatId), photo, { caption });
   };
 
   const sendNow = async (ctx: Context) => {
@@ -61,11 +50,11 @@ export const createBot = (prisma: PrismaClient, config: EnvConfig, state: BotSta
     }
     const buffer = await captureRadarChart();
     const caption = `Cloudflare Radar 🇮🇷\n${formatTimestamp(config.defaultTimezone)}`;
-    await sendChartToTargets(BigInt(ctx.chat.id), caption, buffer);
+    await sendChartToChat(BigInt(ctx.chat.id), caption, buffer);
     await ctx.reply("چارت ارسال شد ✅");
   };
 
   registerMenuHandlers(bot, { prisma, config, sendNow });
 
-  return { bot, sendChartToTargets, sendChartToChannel };
+  return { bot, sendChartToChat };
 };

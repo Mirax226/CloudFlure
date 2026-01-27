@@ -23,6 +23,17 @@ model User {
   updatedAt  DateTime @updatedAt
 }
 
+model Target {
+  id              Int      @id @default(autoincrement())
+  tgChatId         BigInt   @unique
+  name            String?
+  isEnabled       Boolean  @default(true)
+  intervalMinutes Int
+  lastSentAt      DateTime?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+}
+
 model JobLog {
   id          Int       @id @default(autoincrement())
   runAt       DateTime
