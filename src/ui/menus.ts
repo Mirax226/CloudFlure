@@ -189,7 +189,7 @@ export const registerMenuHandlers = (
 
   bot.on("message:text", async (ctx: BotContext) => {
     await ensureUser(ctx, prisma);
-    const text = ctx.message.text.trim();
+    const text = ctx.message!.text!.trim();
     const quickTime = parseTime(text);
     if (quickTime) {
       await setUserTime(ctx, prisma, quickTime.hour, quickTime.minute);
