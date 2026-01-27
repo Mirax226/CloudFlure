@@ -1,27 +1,28 @@
 import { Keyboard } from "grammy";
 
 export const labels = {
-  status: "📊 وضعیت من",
-  setTime: "⏱ تنظیم زمان ارسال",
-  activate: "✅ فعال‌سازی ارسال خودکار",
-  deactivate: "⛔ غیرفعال‌سازی",
+  sendNow: "⚡ ارسال فوری چارت",
+  addTarget: "➕ افزودن کانال/گروه",
+  listTargets: "🗂 لیست مقصدها",
+  selectTarget: "🎯 انتخاب مقصد",
+  setInterval: "⏱ تنظیم بازه ارسال",
+  toggleTarget: "✅ فعال/غیرفعال مقصد",
   help: "ℹ️ راهنما",
-  adminSendNow: "⚡ ارسال فوری چارت",
 };
 
-export const buildMainKeyboard = (isAdminUser: boolean): Keyboard => {
+export const buildMainKeyboard = (): Keyboard => {
   const keyboard = new Keyboard()
-    .text(labels.status)
-    .text(labels.setTime)
+    .text(labels.sendNow)
     .row()
-    .text(labels.activate)
-    .text(labels.deactivate)
+    .text(labels.addTarget)
+    .text(labels.listTargets)
+    .row()
+    .text(labels.selectTarget)
+    .text(labels.setInterval)
+    .row()
+    .text(labels.toggleTarget)
     .row()
     .text(labels.help);
-
-  if (isAdminUser) {
-    keyboard.row().text(labels.adminSendNow);
-  }
 
   return keyboard.resized();
 };

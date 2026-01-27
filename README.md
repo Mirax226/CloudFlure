@@ -5,9 +5,9 @@ Telegram bot + scheduler برای ارسال خودکار چارت Cloudflare Ra
 ## Features
 - Express health route و webhook
 - Reply keyboard فارسی با ایموجی‌ها
-- تنظیم زمان ارسال از داخل ربات
-- اسکرین‌شات با Playwright
-- زمان‌بندی دقیقه‌ای + قفل جلوگیری از ارسال تکراری
+- مدیریت مقصدها و بازه ارسال از داخل ربات
+- اسکرین‌شات با Playwright (عنصر چارت با fallback)
+- زمان‌بندی دقیقه‌ای + جلوگیری از هم‌پوشانی
 
 ## Requirements
 - Node.js 20+
@@ -22,14 +22,19 @@ Telegram bot + scheduler برای ارسال خودکار چارت Cloudflare Ra
 - `DATABASE_URL` را از Render بگیرید.
 
 ### 3) تنظیم متغیرها
-```bash
+متغیرهای الزامی:
+```
 BOT_TOKEN=...
 PUBLIC_BASE_URL=https://your-service.onrender.com
 DATABASE_URL=postgresql://...
-ADMIN_USER_IDS=12345678,87654321
+```
+
+متغیرهای اختیاری:
+```bash
 DEFAULT_TIMEZONE=Asia/Baku
 SEND_ON_DEPLOY=false
 SCREENSHOT_COOLDOWN_SEC=30
+MAX_SENDS_PER_TICK=20
 ```
 
 ### 4) مهاجرت Prisma
@@ -51,9 +56,8 @@ ${PUBLIC_BASE_URL}/telegram/webhook
 
 ## Targets
 - مقصدها از داخل رابط ربات تنظیم می‌شوند و برای هر تارگت زمان‌بندی جدا دارند.
-
-## Admins
-- `ADMIN_USER_IDS` لیست عددی ID کاربر است، جدا شده با کاما.
+- برای افزودن مقصد: روی ➕ بزنید و یک پیام از کانال/گروه فوروارد کنید.
+- برای ارسال در کانال، بات باید ادمین باشد.
 
 ## Deploy on Render
 1. Repo را به Render وصل کنید.

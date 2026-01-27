@@ -6,7 +6,7 @@ import { captureRadarChart } from "./screenshot/capture.js";
 import { registerMenuHandlers, type SessionData } from "./ui/menus.js";
 
 export type BotState = {
-  lastAdminSendAt: number | null;
+  lastSendByUserId: Map<number, number>;
 };
 
 const formatTimestamp = (timezone: string): string => {
@@ -27,7 +27,7 @@ export const createBot = (prisma: PrismaClient, config: EnvConfig, state: BotSta
 
   bot.use(
     session({
-      initial: (): SessionData => ({ step: null, tempHour: null }),
+      initial: (): SessionData => ({ step: null }),
     })
   );
 
@@ -37,24 +37,46 @@ export const createBot = (prisma: PrismaClient, config: EnvConfig, state: BotSta
   };
 
   const sendNow = async (ctx: Context) => {
+    const tgUserId = ctx.from?.id;
+    if (!tgUserId) {
+      await ctx.reply("کاربر نامعتبره، دوباره تلاش کن.");
+      return;
+    }
     const now = Date.now();
-    if (state.lastAdminSendAt && now - state.lastAdminSendAt < config.screenshotCooldownSec * 1000) {
+    const lastSent = state.lastSendByUserId.get(tgUserId);
+    if (lastSent && now - lastSent < config.screenshotCooldownSec * 1000) {
       await ctx.reply("کمی صبر کن تا دوباره ارسال کنیم ⏳");
       return;
     }
 
-    state.lastAdminSendAt = now;
-    if (!ctx.chat?.id) {
+    const user = await prisma.user.upsert({
+      where: { tgUserId: BigInt(tgUserId) },
+      update: {},
+      create: { tgUserId: BigInt(tgUserId) },
+    });
+
+    const privateChatId = user.privateChatId ?? (ctx.chat?.id ? BigInt(ctx.chat.id) : null);
+    if (!privateChatId) {
       await ctx.reply("چت نامعتبره، دوباره تلاش کن.");
       return;
     }
+
+    const selectedTarget = user.selectedTargetId
+      ? await prisma.targetChat.findUnique({ where: { id: user.selectedTargetId } })
+      : null;
+    const shouldSendToTarget = Boolean(selectedTarget?.isEnabled);
+
+    state.lastSendByUserId.set(tgUserId, now);
     const buffer = await captureRadarChart();
     const caption = `Cloudflare Radar 🇮🇷\n${formatTimestamp(config.defaultTimezone)}`;
-    await sendChartToChat(BigInt(ctx.chat.id), caption, buffer);
+    await sendChartToChat(privateChatId, caption, buffer);
+    if (shouldSendToTarget && selectedTarget) {
+      await sendChartToChat(selectedTarget.chatId, caption, buffer);
+    }
     await ctx.reply("چارت ارسال شد ✅");
   };
 
-  registerMenuHandlers(bot, { prisma, config, sendNow });
+  registerMenuHandlers(bot, { prisma, sendNow });
 
   return { bot, sendChartToChat };
 };

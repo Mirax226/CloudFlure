@@ -1,4 +1,5 @@
-import type { Prisma, PrismaClient } from "@prisma/client";
+import type { PrismaClient } from "@prisma/client";
+import { SendStatus } from "@prisma/client";
 import type { EnvConfig } from "../config.js";
 import { captureRadarChart } from "../screenshot/capture.js";
 
@@ -9,29 +10,7 @@ export type Sender = {
 };
 
 export type SchedulerState = {
-  inMemoryLock: boolean;
-};
-
-const lockKey = "scheduler_lock";
-
-const acquireDbLock = async (prisma: PrismaClient, ttlMs: number): Promise<boolean> => {
-  const now = new Date();
-  const lock = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
-    const existing = await tx.state.findUnique({ where: { key: lockKey } });
-    if (existing) {
-      const expiresAt = new Date(existing.updatedAt.getTime() + ttlMs);
-      if (expiresAt > now) {
-        return false;
-      }
-    }
-    await tx.state.upsert({
-      where: { key: lockKey },
-      update: { value: now.toISOString() },
-      create: { key: lockKey, value: now.toISOString() },
-    });
-    return true;
-  });
-  return lock;
+  isTickRunning: boolean;
 };
 
 const formatTimestamp = (timezone: string): string => {
@@ -53,71 +32,80 @@ export const runSchedulerTick = async (
   sender: Sender,
   state: SchedulerState
 ) => {
-  if (state.inMemoryLock) {
+  if (state.isTickRunning) {
     console.log("scheduler_tick_skipped", { reason: "in_memory_lock" });
     return;
   }
 
-  state.inMemoryLock = true;
+  state.isTickRunning = true;
   try {
-    const hasDbLock = await acquireDbLock(prisma, 55_000);
-    if (!hasDbLock) {
-      console.log("scheduler_tick_skipped", { reason: "db_lock" });
-      return;
-    }
-
     const now = new Date();
-    const targets = await prisma.target.findMany({
-      where: { isEnabled: true },
+    const schedules = await prisma.targetSchedule.findMany({
+      where: { targetChat: { isEnabled: true } },
+      include: { targetChat: true },
+      orderBy: { updatedAt: "asc" },
     });
 
-    if (!targets.length) {
+    if (!schedules.length) {
       console.log("scheduler_tick_no_targets");
       return;
     }
 
     const nowMs = now.getTime();
-    const dueTargets = targets.filter((target) => {
-      if (!target.lastSentAt) {
+    const dueSchedules = schedules.filter((schedule) => {
+      if (!schedule.lastSentAt) {
         return true;
       }
-      const elapsedMs = nowMs - target.lastSentAt.getTime();
-      return elapsedMs >= target.intervalMinutes * 60 * 1000;
+      const elapsedMs = nowMs - schedule.lastSentAt.getTime();
+      return elapsedMs >= schedule.intervalMinutes * 60 * 1000;
     });
 
-    if (!dueTargets.length) {
+    if (!dueSchedules.length) {
       console.log("scheduler_tick_no_due_targets");
       return;
     }
 
+    const pendingSchedules = dueSchedules.slice(0, config.maxSendsPerTick);
+    if (dueSchedules.length > pendingSchedules.length) {
+      console.log("scheduler_tick_rate_limited", {
+        dueCount: dueSchedules.length,
+        processedCount: pendingSchedules.length,
+      });
+    }
+
     const buffer = await captureRadarChart();
     const caption = `Cloudflare Radar 🇮🇷\n${formatTimestamp(config.defaultTimezone)}`;
-    const runAt = new Date();
-    let successCount = 0;
 
-    for (const target of dueTargets) {
+    for (const schedule of pendingSchedules) {
+      const sentAt = new Date();
       try {
-        await sender.sendChartToChat(target.tgChatId, caption, buffer);
-        successCount += 1;
-        await prisma.target.update({
-          where: { id: target.id },
-          data: { lastSentAt: now },
+        await sender.sendChartToChat(schedule.targetChat.chatId, caption, buffer);
+        await prisma.targetSchedule.update({
+          where: { id: schedule.id },
+          data: { lastSentAt: sentAt },
+        });
+        await prisma.sendLog.create({
+          data: {
+            targetChatId: schedule.targetChatId,
+            sentAt,
+            status: SendStatus.SUCCESS,
+            error: null,
+          },
         });
         await delay(200);
       } catch (error) {
         console.error("scheduler_send_failed", { error });
+        await prisma.sendLog.create({
+          data: {
+            targetChatId: schedule.targetChatId,
+            sentAt,
+            status: SendStatus.FAIL,
+            error: error instanceof Error ? error.message : "Unknown error",
+          },
+        });
       }
     }
-
-    await prisma.jobLog.create({
-      data: {
-        runAt,
-        status: successCount === dueTargets.length ? "SUCCESS" : "FAIL",
-        error: successCount === dueTargets.length ? null : "Some sends failed",
-        targetCount: dueTargets.length,
-      },
-    });
   } finally {
-    state.inMemoryLock = false;
+    state.isTickRunning = false;
   }
 };

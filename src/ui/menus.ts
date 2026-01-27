@@ -1,230 +1,316 @@
 import type { Bot, Context } from "grammy";
 import type { PrismaClient } from "@prisma/client";
-import type { EnvConfig } from "../config.js";
+import { TargetChatType } from "@prisma/client";
 import { labels, buildMainKeyboard } from "./keyboards.js";
-import { isAdmin } from "../auth/admin.js";
 
 export type SessionData = {
-  step?: "hour" | "minute" | null;
-  tempHour?: number | null;
+  step?: "awaitingTargetForward" | "awaitingTargetSelection" | "awaitingInterval" | null;
 };
 
 type BotContext = Context & { session: SessionData };
 
 type MenuDeps = {
   prisma: PrismaClient;
-  config: EnvConfig;
   sendNow: (ctx: Context) => Promise<void>;
+};
+
+type ForwardedChat = {
+  id: number;
+  title?: string;
+  type: string;
 };
 
 const ensureUser = async (ctx: Context, prisma: PrismaClient) => {
   const tgUserId = ctx.from?.id;
-  const tgChatId = ctx.chat?.id;
-  if (!tgUserId || !tgChatId) {
+  if (!tgUserId) {
     return null;
   }
+  const privateChatId = ctx.chat?.type === "private" ? ctx.chat.id : null;
   return prisma.user.upsert({
     where: { tgUserId: BigInt(tgUserId) },
-    update: { tgChatId: BigInt(tgChatId) },
-    create: { tgUserId: BigInt(tgUserId), tgChatId: BigInt(tgChatId) },
+    update: privateChatId ? { privateChatId: BigInt(privateChatId) } : {},
+    create: {
+      tgUserId: BigInt(tgUserId),
+      privateChatId: privateChatId ? BigInt(privateChatId) : null,
+    },
   });
 };
 
-const formatTime = (hour?: number | null, minute?: number | null): string => {
-  if (hour === null || hour === undefined || minute === null || minute === undefined) {
-    return "تنظیم نشده";
-  }
-  const hh = String(hour).padStart(2, "0");
-  const mm = String(minute).padStart(2, "0");
-  return `${hh}:${mm}`;
-};
-
-const parseHour = (value: string): number | null => {
-  const hour = Number(value);
-  if (Number.isNaN(hour) || hour < 0 || hour > 23) {
-    return null;
-  }
-  return hour;
-};
-
-const parseMinute = (value: string): number | null => {
-  const minute = Number(value);
-  if (Number.isNaN(minute) || minute < 0 || minute > 59) {
-    return null;
-  }
-  return minute;
-};
-
-const parseTime = (value: string): { hour: number; minute: number } | null => {
-  const match = value.trim().match(/^(\d{1,2}):(\d{1,2})$/);
-  if (!match) {
-    return null;
-  }
-  const hour = parseHour(match[1]);
-  const minute = parseMinute(match[2]);
-  if (hour === null || minute === null) {
-    return null;
-  }
-  return { hour, minute };
-};
-
-const setUserTime = async (ctx: Context, prisma: PrismaClient, hour: number, minute: number) => {
-  const tgUserId = ctx.from?.id;
-  if (!tgUserId) {
-    return;
-  }
-  await prisma.user.update({
-    where: { tgUserId: BigInt(tgUserId) },
-    data: { sendHour: hour, sendMinute: minute },
+const getUserTargets = async (userId: number, prisma: PrismaClient) => {
+  return prisma.targetChat.findMany({
+    where: { createdByUserId: userId },
+    include: { schedule: true },
+    orderBy: { createdAt: "asc" },
   });
 };
 
-const showStatus = async (ctx: Context, prisma: PrismaClient, config: EnvConfig) => {
-  const tgUserId = ctx.from?.id;
-  if (!tgUserId) {
-    return;
-  }
-  const user = await prisma.user.findUnique({
-    where: { tgUserId: BigInt(tgUserId) },
-  });
-  const isActive = user?.isActive ?? false;
-  const time = formatTime(user?.sendHour, user?.sendMinute);
-  const lastSent = "ثبت نشده";
-  await ctx.reply(
-    `وضعیت: ${isActive ? "فعال ✅" : "غیرفعال ⛔"}\nزمان ارسال: ${time}\nآخرین ارسال: ${lastSent}`,
-    { reply_markup: buildMainKeyboard(isAdmin(ctx, config)) }
-  );
+const formatTargetLine = (index: number, target: Awaited<ReturnType<typeof getUserTargets>>[number]) => {
+  const title = target.title ?? "بدون عنوان";
+  const enabled = target.isEnabled ? "فعال ✅" : "غیرفعال ⛔";
+  const interval = target.schedule?.intervalMinutes ?? 60;
+  return `${index}. ${title} — ${enabled} — هر ${interval} دقیقه`;
 };
 
-const showHelp = async (ctx: Context, config: EnvConfig) => {
+const parseIntervalMinutes = (value: string): number | null => {
+  const trimmed = value.trim().toLowerCase();
+  const hourMatch = trimmed.match(/^(\d+)\s*h$/);
+  if (hourMatch) {
+    return Number(hourMatch[1]) * 60;
+  }
+  const minuteMatch = trimmed.match(/^(\d+)\s*m$/);
+  if (minuteMatch) {
+    return Number(minuteMatch[1]);
+  }
+  const numeric = Number(trimmed);
+  if (Number.isNaN(numeric)) {
+    return null;
+  }
+  return numeric;
+};
+
+const resolveTargetType = (chatType: string): TargetChatType | null => {
+  switch (chatType) {
+    case "channel":
+      return TargetChatType.CHANNEL;
+    case "group":
+      return TargetChatType.GROUP;
+    case "supergroup":
+      return TargetChatType.SUPERGROUP;
+    default:
+      return null;
+  }
+};
+
+const showHelp = async (ctx: Context) => {
   await ctx.reply(
     [
-      "برای تنظیم زمان ارسال از دکمه ⏱ استفاده کنید.",
-      "فعال‌سازی فقط بعد از تنظیم زمان ممکن است.",
-      `زمان نمایش بر اساس ${config.defaultTimezone} است.`,
+      "برای افزودن مقصد، روی ➕ بزن و از کانال/گروه برام پیام فوروارد کن 📩",
+      "برای تنظیم بازه ارسال باید اول مقصد رو انتخاب کنی 🎯",
+      "بعد از انتخاب مقصد، بازه رو با عدد دقیقه یا فرمت 2h/45m ارسال کن ⏱",
     ].join("\n"),
-    { reply_markup: buildMainKeyboard(isAdmin(ctx, config)) }
+    { reply_markup: buildMainKeyboard() }
   );
 };
 
 export const registerMenuHandlers = (
   bot: Bot<BotContext>,
-  { prisma, config, sendNow }: MenuDeps
+  { prisma, sendNow }: MenuDeps
 ) => {
   bot.command("start", async (ctx: BotContext) => {
     await ensureUser(ctx, prisma);
+    ctx.session.step = null;
     await ctx.reply("خوش اومدی! یکی از گزینه‌های زیر رو انتخاب کن:", {
-      reply_markup: buildMainKeyboard(isAdmin(ctx, config)),
+      reply_markup: buildMainKeyboard(),
     });
   });
 
-  bot.hears(labels.status, async (ctx: BotContext) => {
+  bot.hears(labels.sendNow, async (ctx: BotContext) => {
     await ensureUser(ctx, prisma);
-    await showStatus(ctx, prisma, config);
+    ctx.session.step = null;
+    await sendNow(ctx);
   });
 
-  bot.hears(labels.setTime, async (ctx: BotContext) => {
+  bot.hears(labels.addTarget, async (ctx: BotContext) => {
     await ensureUser(ctx, prisma);
-    ctx.session.step = "hour";
-    ctx.session.tempHour = null;
-    await ctx.reply("ساعت رو بفرست (0 تا 23) ⌚", {
-      reply_markup: buildMainKeyboard(isAdmin(ctx, config)),
-    });
+    ctx.session.step = "awaitingTargetForward";
+    await ctx.reply(
+      "بات رو به کانال/گروه اضافه کن و یک پیام از همونجا برام Forward کن 📩",
+      { reply_markup: buildMainKeyboard() }
+    );
   });
 
-  bot.hears(labels.activate, async (ctx: BotContext) => {
-    await ensureUser(ctx, prisma);
-    const tgUserId = ctx.from?.id;
-    if (!tgUserId) {
+  bot.hears(labels.listTargets, async (ctx: BotContext) => {
+    const user = await ensureUser(ctx, prisma);
+    ctx.session.step = null;
+    if (!user) {
       return;
     }
-    const user = await prisma.user.findUnique({
-      where: { tgUserId: BigInt(tgUserId) },
-    });
-    if (user?.sendHour === null || user?.sendHour === undefined || user?.sendMinute === null || user?.sendMinute === undefined) {
-      await ctx.reply("اول زمان ارسال رو تنظیم کن ⏱", {
-        reply_markup: buildMainKeyboard(isAdmin(ctx, config)),
+    const targets = await getUserTargets(user.id, prisma);
+    if (!targets.length) {
+      await ctx.reply("هنوز مقصدی اضافه نکردی. از دکمه ➕ استفاده کن.", {
+        reply_markup: buildMainKeyboard(),
       });
       return;
     }
-    await prisma.user.update({
-      where: { tgUserId: BigInt(tgUserId) },
-      data: { isActive: true },
+    const lines = targets.map((target, index) => formatTargetLine(index + 1, target));
+    await ctx.reply(lines.join("\n"), { reply_markup: buildMainKeyboard() });
+  });
+
+  bot.hears(labels.selectTarget, async (ctx: BotContext) => {
+    const user = await ensureUser(ctx, prisma);
+    if (!user) {
+      return;
+    }
+    const targets = await getUserTargets(user.id, prisma);
+    if (!targets.length) {
+      await ctx.reply("اول یک مقصد اضافه کن. از دکمه ➕ استفاده کن.", {
+        reply_markup: buildMainKeyboard(),
+      });
+      return;
+    }
+    const lines = targets.map((target, index) => formatTargetLine(index + 1, target));
+    await ctx.reply([lines.join("\n"), "شماره مقصد را ارسال کن 🎯"].join("\n"), {
+      reply_markup: buildMainKeyboard(),
     });
-    await ctx.reply("ارسال خودکار فعال شد ✅", {
-      reply_markup: buildMainKeyboard(isAdmin(ctx, config)),
+    ctx.session.step = "awaitingTargetSelection";
+  });
+
+  bot.hears(labels.setInterval, async (ctx: BotContext) => {
+    const user = await ensureUser(ctx, prisma);
+    if (!user?.selectedTargetId) {
+      await ctx.reply("اول مقصد رو انتخاب کن 🎯", {
+        reply_markup: buildMainKeyboard(),
+      });
+      return;
+    }
+    ctx.session.step = "awaitingInterval";
+    await ctx.reply("بازه ارسال رو بفرست (مثلاً 15 یا 2h یا 45m) ⏱", {
+      reply_markup: buildMainKeyboard(),
     });
   });
 
-  bot.hears(labels.deactivate, async (ctx: BotContext) => {
-    await ensureUser(ctx, prisma);
-    const tgUserId = ctx.from?.id;
-    if (!tgUserId) {
+  bot.hears(labels.toggleTarget, async (ctx: BotContext) => {
+    const user = await ensureUser(ctx, prisma);
+    ctx.session.step = null;
+    if (!user?.selectedTargetId) {
+      await ctx.reply("اول مقصد رو انتخاب کن 🎯", {
+        reply_markup: buildMainKeyboard(),
+      });
       return;
     }
-    await prisma.user.update({
-      where: { tgUserId: BigInt(tgUserId) },
-      data: { isActive: false },
+    const target = await prisma.targetChat.findUnique({
+      where: { id: user.selectedTargetId },
     });
-    await ctx.reply("ارسال خودکار غیرفعال شد ⛔", {
-      reply_markup: buildMainKeyboard(isAdmin(ctx, config)) }
+    if (!target) {
+      await ctx.reply("مقصد پیدا نشد. دوباره انتخاب کن.", {
+        reply_markup: buildMainKeyboard(),
+      });
+      return;
+    }
+    const updated = await prisma.targetChat.update({
+      where: { id: target.id },
+      data: { isEnabled: !target.isEnabled },
+    });
+    await ctx.reply(
+      `وضعیت مقصد شد: ${updated.isEnabled ? "فعال ✅" : "غیرفعال ⛔"}`,
+      { reply_markup: buildMainKeyboard() }
     );
   });
 
   bot.hears(labels.help, async (ctx: BotContext) => {
     await ensureUser(ctx, prisma);
-    await showHelp(ctx, config);
+    ctx.session.step = null;
+    await showHelp(ctx);
   });
 
-  bot.hears(labels.adminSendNow, async (ctx: BotContext) => {
-    await ensureUser(ctx, prisma);
-    if (!isAdmin(ctx, config)) {
-      await ctx.reply("این بخش فقط برای ادمینه 🔒", {
-        reply_markup: buildMainKeyboard(false),
+  bot.on("message", async (ctx: BotContext) => {
+    const user = await ensureUser(ctx, prisma);
+    if (!user) {
+      return;
+    }
+
+    const message = ctx.message;
+    const forwardChat =
+      message && "forward_from_chat" in message
+        ? (message.forward_from_chat as ForwardedChat | undefined)
+        : undefined;
+    if (ctx.session.step === "awaitingTargetForward") {
+      if (!forwardChat) {
+        await ctx.reply("پیام فوروارد شده از کانال/گروه رو بفرست 📩", {
+          reply_markup: buildMainKeyboard(),
+        });
+        return;
+      }
+      const targetType = resolveTargetType(forwardChat.type);
+      if (!targetType) {
+        await ctx.reply("نوع مقصد پشتیبانی نمی‌شه. دوباره تلاش کن.", {
+          reply_markup: buildMainKeyboard(),
+        });
+        return;
+      }
+      const target = await prisma.targetChat.upsert({
+        where: { chatId: BigInt(forwardChat.id) },
+        update: {
+          title: forwardChat.title ?? null,
+          type: targetType,
+        },
+        create: {
+          chatId: BigInt(forwardChat.id),
+          title: forwardChat.title ?? null,
+          type: targetType,
+          createdByUserId: user.id,
+        },
+      });
+      await prisma.targetSchedule.upsert({
+        where: { targetChatId: target.id },
+        update: {},
+        create: {
+          targetChatId: target.id,
+          intervalMinutes: 60,
+        },
+      });
+      ctx.session.step = null;
+      await ctx.reply(
+        `✅ مقصد اضافه شد: ${target.title ?? "بدون عنوان"} — هر 60 دقیقه`,
+        { reply_markup: buildMainKeyboard() }
+      );
+      return;
+    }
+
+    const text = message?.text?.trim();
+    if (!text) {
+      return;
+    }
+
+    if (ctx.session.step === "awaitingTargetSelection") {
+      const index = Number(text);
+      if (Number.isNaN(index) || index < 1) {
+        await ctx.reply("شماره نامعتبره. یک عدد معتبر بفرست.", {
+          reply_markup: buildMainKeyboard(),
+        });
+        return;
+      }
+      const targets = await getUserTargets(user.id, prisma);
+      const target = targets[index - 1];
+      if (!target) {
+        await ctx.reply("شماره مقصد پیدا نشد. دوباره تلاش کن.", {
+          reply_markup: buildMainKeyboard(),
+        });
+        return;
+      }
+      await prisma.user.update({
+        where: { id: user.id },
+        data: { selectedTargetId: target.id },
+      });
+      ctx.session.step = null;
+      await ctx.reply(`🎯 مقصد انتخاب شد: ${target.title ?? "بدون عنوان"}`, {
+        reply_markup: buildMainKeyboard(),
       });
       return;
     }
-    await sendNow(ctx);
-  });
 
-  bot.on("message:text", async (ctx: BotContext) => {
-    await ensureUser(ctx, prisma);
-    const text = ctx.message!.text!.trim();
-    const quickTime = parseTime(text);
-    if (quickTime) {
-      await setUserTime(ctx, prisma, quickTime.hour, quickTime.minute);
-      ctx.session.step = null;
-      ctx.session.tempHour = null;
-      await ctx.reply(`زمان شما شد ${formatTime(quickTime.hour, quickTime.minute)} ✅`, {
-        reply_markup: buildMainKeyboard(isAdmin(ctx, config)),
+    if (ctx.session.step === "awaitingInterval") {
+      const minutes = parseIntervalMinutes(text);
+      if (!minutes || minutes < 1 || minutes > 1440) {
+        await ctx.reply("عدد نامعتبره. بازه باید بین 1 تا 1440 دقیقه باشه.", {
+          reply_markup: buildMainKeyboard(),
+        });
+        return;
+      }
+      if (!user.selectedTargetId) {
+        await ctx.reply("اول مقصد رو انتخاب کن 🎯", {
+          reply_markup: buildMainKeyboard(),
+        });
+        return;
+      }
+      await prisma.targetSchedule.upsert({
+        where: { targetChatId: user.selectedTargetId },
+        update: { intervalMinutes: minutes },
+        create: { targetChatId: user.selectedTargetId, intervalMinutes: minutes },
       });
-      return;
-    }
-
-    if (ctx.session.step === "hour") {
-      const hour = parseHour(text);
-      if (hour === null) {
-        await ctx.reply("عدد نامعتبره. ساعت باید بین 0 تا 23 باشه ⌚");
-        return;
-      }
-      ctx.session.tempHour = hour;
-      ctx.session.step = "minute";
-      await ctx.reply("دقیقه رو بفرست (0 تا 59) ⏰");
-      return;
-    }
-
-    if (ctx.session.step === "minute") {
-      const minute = parseMinute(text);
-      if (minute === null) {
-        await ctx.reply("عدد نامعتبره. دقیقه باید بین 0 تا 59 باشه ⏰");
-        return;
-      }
-      const hour = ctx.session.tempHour ?? 0;
-      await setUserTime(ctx, prisma, hour, minute);
       ctx.session.step = null;
-      ctx.session.tempHour = null;
-      await ctx.reply(`زمان شما شد ${formatTime(hour, minute)} ✅`, {
-        reply_markup: buildMainKeyboard(isAdmin(ctx, config)),
+      await ctx.reply(`بازه ارسال شد ${minutes} دقیقه ✅`, {
+        reply_markup: buildMainKeyboard(),
       });
       return;
     }
