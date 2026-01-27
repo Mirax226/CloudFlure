@@ -25,7 +25,6 @@ Telegram bot + scheduler برای ارسال خودکار چارت Cloudflare Ra
 ```bash
 BOT_TOKEN=...
 PUBLIC_BASE_URL=https://your-service.onrender.com
-WEBHOOK_SECRET=some-secret
 DATABASE_URL=postgresql://...
 CHANNEL_CHAT_ID=-1001234567890
 ADMIN_USER_IDS=12345678,87654321
@@ -48,7 +47,7 @@ npm run dev
 ## Webhook
 Webhook به صورت خودکار در استارت ست می‌شود:
 ```
-${PUBLIC_BASE_URL}/telegram/webhook/${WEBHOOK_SECRET}
+${PUBLIC_BASE_URL}/telegram/webhook
 ```
 
 ## Channel Chat ID

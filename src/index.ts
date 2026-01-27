@@ -22,11 +22,7 @@ app.get("/health", (_req: Request, res: Response) => {
   res.send("ok");
 });
 
-app.post("/telegram/webhook/:secret", async (req: Request, res: Response) => {
-  if (req.params.secret !== config.webhookSecret) {
-    res.status(403).send("forbidden");
-    return;
-  }
+app.post("/telegram/webhook", async (req: Request, res: Response) => {
   await bot.handleUpdate(req.body);
   res.send("ok");
 });
@@ -34,7 +30,7 @@ app.post("/telegram/webhook/:secret", async (req: Request, res: Response) => {
 const port = Number(process.env.PORT) || 3000;
 
 const start = async () => {
-  await bot.api.setWebhook(`${config.publicBaseUrl}/telegram/webhook/${config.webhookSecret}`);
+  await bot.api.setWebhook(`${config.publicBaseUrl}/telegram/webhook`);
 
   const schedulerState = { inMemoryLock: false };
   const tick = async () => {
