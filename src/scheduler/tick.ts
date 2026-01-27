@@ -5,7 +5,7 @@ import { captureRadarChart } from "../screenshot/capture.js";
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export type Sender = {
-  sendChartToTargets: (userChatId: bigint, caption: string, buffer: Buffer) => Promise<void>;
+  sendChartToChat: (chatId: bigint, caption: string, buffer: Buffer) => Promise<void>;
 };
 
 export type SchedulerState = {
@@ -67,18 +67,26 @@ export const runSchedulerTick = async (
     }
 
     const now = new Date();
-    const currentHour = now.getHours();
-    const currentMinute = now.getMinutes();
-
-    const users = await prisma.user.findMany({
-      where: {
-        isActive: true,
-        sendHour: currentHour,
-        sendMinute: currentMinute,
-      },
+    const targets = await prisma.target.findMany({
+      where: { isEnabled: true },
     });
 
-    if (!users.length) {
+    if (!targets.length) {
+      console.log("scheduler_tick_no_targets");
+      return;
+    }
+
+    const nowMs = now.getTime();
+    const dueTargets = targets.filter((target) => {
+      if (!target.lastSentAt) {
+        return true;
+      }
+      const elapsedMs = nowMs - target.lastSentAt.getTime();
+      return elapsedMs >= target.intervalMinutes * 60 * 1000;
+    });
+
+    if (!dueTargets.length) {
+      console.log("scheduler_tick_no_due_targets");
       return;
     }
 
@@ -87,26 +95,26 @@ export const runSchedulerTick = async (
     const runAt = new Date();
     let successCount = 0;
 
-    for (const user of users) {
+    for (const target of dueTargets) {
       try {
-        await sender.sendChartToTargets(user.tgChatId, caption, buffer);
+        await sender.sendChartToChat(target.tgChatId, caption, buffer);
         successCount += 1;
+        await prisma.target.update({
+          where: { id: target.id },
+          data: { lastSentAt: now },
+        });
         await delay(200);
       } catch (error) {
         console.error("scheduler_send_failed", { error });
-        await prisma.user.update({
-          where: { id: user.id },
-          data: { isActive: false },
-        });
       }
     }
 
     await prisma.jobLog.create({
       data: {
         runAt,
-        status: successCount === users.length ? "SUCCESS" : "FAIL",
-        error: successCount === users.length ? null : "Some sends failed",
-        targetCount: users.length,
+        status: successCount === dueTargets.length ? "SUCCESS" : "FAIL",
+        error: successCount === dueTargets.length ? null : "Some sends failed",
+        targetCount: dueTargets.length,
       },
     });
   } finally {

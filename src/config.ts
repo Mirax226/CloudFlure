@@ -6,7 +6,7 @@ type EnvConfig = {
   botToken: string;
   publicBaseUrl: string;
   databaseUrl: string;
-  channelChatId: number;
+  channelChatId?: number;
   adminUserIds: number[];
   defaultTimezone: string;
   sendOnDeploy: boolean;
@@ -29,6 +29,13 @@ const parseNumber = (value: string, key: string): number => {
   return parsed;
 };
 
+const parseOptionalNumber = (value: string | undefined, key: string): number | undefined => {
+  if (!value) {
+    return undefined;
+  }
+  return parseNumber(value, key);
+};
+
 const parseBoolean = (value: string): boolean => {
   return value.toLowerCase() === "true";
 };
@@ -37,7 +44,7 @@ export const loadConfig = (): EnvConfig => {
   const botToken = requireEnv("BOT_TOKEN");
   const publicBaseUrl = requireEnv("PUBLIC_BASE_URL");
   const databaseUrl = requireEnv("DATABASE_URL");
-  const channelChatId = parseNumber(requireEnv("CHANNEL_CHAT_ID"), "CHANNEL_CHAT_ID");
+  const channelChatId = parseOptionalNumber(process.env.CHANNEL_CHAT_ID, "CHANNEL_CHAT_ID");
   const adminUserIds = requireEnv("ADMIN_USER_IDS")
     .split(",")
     .map((id) => id.trim())
