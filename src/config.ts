@@ -5,7 +5,6 @@ dotenv.config();
 type EnvConfig = {
   botToken: string;
   publicBaseUrl: string;
-  webhookSecret: string;
   databaseUrl: string;
   channelChatId: number;
   adminUserIds: number[];
@@ -37,7 +36,6 @@ const parseBoolean = (value: string): boolean => {
 export const loadConfig = (): EnvConfig => {
   const botToken = requireEnv("BOT_TOKEN");
   const publicBaseUrl = requireEnv("PUBLIC_BASE_URL");
-  const webhookSecret = requireEnv("WEBHOOK_SECRET");
   const databaseUrl = requireEnv("DATABASE_URL");
   const channelChatId = parseNumber(requireEnv("CHANNEL_CHAT_ID"), "CHANNEL_CHAT_ID");
   const adminUserIds = requireEnv("ADMIN_USER_IDS")
@@ -55,7 +53,6 @@ export const loadConfig = (): EnvConfig => {
   return {
     botToken,
     publicBaseUrl,
-    webhookSecret,
     databaseUrl,
     channelChatId,
     adminUserIds,
