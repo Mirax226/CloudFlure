@@ -32,7 +32,6 @@ DATABASE_URL=postgresql://...
 متغیرهای اختیاری:
 ```bash
 DEFAULT_TIMEZONE=Asia/Baku
-SEND_ON_DEPLOY=false
 SCREENSHOT_COOLDOWN_SEC=30
 MAX_SENDS_PER_TICK=20
 ```
@@ -59,14 +58,20 @@ ${PUBLIC_BASE_URL}/telegram/webhook
 - برای افزودن مقصد: روی ➕ بزنید و یک پیام از کانال/گروه فوروارد کنید.
 - برای ارسال در کانال، بات باید ادمین باشد.
 
-## Deploy on Render
-1. Repo را به Render وصل کنید.
-2. Dockerfile را انتخاب کنید.
-3. Env vars بالا را وارد کنید.
-4. Migration ها را در Render اجرا کنید (از داشبورد یا یک Job):
+## Render checklist (Amir)
+1. Render → New → PostgreSQL بسازید.
+2. Render → New → Web Service (Docker) و repo را وصل کنید.
+3. فقط این env vars را تنظیم کنید (Internal Database URL را استفاده کن):
    ```bash
-   npm run prisma:migrate
+   BOT_TOKEN=...
+   PUBLIC_BASE_URL=https://your-service.onrender.com
+   DATABASE_URL=postgresql://...
    ```
+4. Deploy as Docker.
+5. Bot را به کانال/گروه اضافه کن و Admin کن.
+6. از داخل ربات:
+   - یک پیام از کانال/گروه به ربات Forward کن تا مقصد اضافه شود.
+   - بازه ارسال را تنظیم کن و مقصد را فعال نگه دار.
 
 ## Health Check
 `GET /health` باید `ok` برگرداند.

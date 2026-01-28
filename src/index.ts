@@ -2,11 +2,10 @@ import express, { type Request, type Response } from "express";
 import { loadConfig } from "./config.js";
 import { prisma } from "./db/prisma.js";
 import { createBot, type BotState } from "./bot.js";
-import { captureRadarChart } from "./screenshot/capture.js";
 import { runSchedulerTick } from "./scheduler/tick.js";
 
 const config = loadConfig();
-console.log("config_loaded", {
+console.log("Config loaded", {
   publicBaseUrl: config.publicBaseUrl,
   maxSendsPerTick: config.maxSendsPerTick,
 });
@@ -29,7 +28,17 @@ app.post("/telegram/webhook", async (req: Request, res: Response) => {
 const port = Number(process.env.PORT) || 3000;
 
 const start = async () => {
-  await bot.api.setWebhook(`${config.publicBaseUrl}/telegram/webhook`);
+  try {
+    await prisma.$connect();
+    console.log("DB connected");
+  } catch (error) {
+    console.error("DB connection failed", { error });
+    process.exit(1);
+  }
+
+  const webhookUrl = `${config.publicBaseUrl}/telegram/webhook`;
+  await bot.api.setWebhook(webhookUrl);
+  console.log(`Webhook set to ${webhookUrl}`);
 
   const schedulerState = { isTickRunning: false };
   const tick = async () => {
@@ -37,18 +46,7 @@ const start = async () => {
   };
 
   setInterval(tick, 60 * 1000);
-
-  if (config.sendOnDeploy) {
-    const buffer = await captureRadarChart();
-    const caption = `Cloudflare Radar 🇮🇷`;
-    const targets = await prisma.targetChat.findMany({ where: { isEnabled: true } });
-    if (!targets.length) {
-      console.log("send_on_deploy_skipped", { reason: "no_targets" });
-    }
-    for (const target of targets) {
-      await sendChartToChat(target.chatId, caption, buffer);
-    }
-  }
+  console.log("Scheduler started");
 
   app.listen(port, () => {
     console.log(`server_listening:${port}`);
