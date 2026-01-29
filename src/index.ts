@@ -7,7 +7,7 @@ import { logError, logInfo } from "./logger.js";
 
 const config = loadConfig();
 console.log("Config loaded", {
-  publicBaseUrl: config.publicBaseUrl,
+  publicUrl: config.publicUrl,
   maxSendsPerTick: config.maxSendsPerTick,
 });
 
@@ -45,14 +45,17 @@ const start = async () => {
   await bot.init();
   console.log("Bot initialized");
 
-  app.post("/telegram/webhook", (req: Request, res: Response) => {
+  app.post("/telegram", (req: Request, res: Response) => {
     res.send("ok");
+    console.log("telegram_update_received", {
+      updateType: Object.keys(req.body ?? {})[0] ?? "unknown",
+    });
     void bot.handleUpdate(req.body).catch((error) => {
       void logError("webhook_update_failed", { error });
     });
   });
 
-  const webhookUrl = `${config.publicBaseUrl}/telegram/webhook`;
+  const webhookUrl = `${config.publicUrl}/telegram`;
   await bot.api.setWebhook(webhookUrl);
   console.log(`Webhook set to ${webhookUrl}`);
 

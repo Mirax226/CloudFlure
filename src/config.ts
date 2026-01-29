@@ -4,8 +4,7 @@ dotenv.config();
 
 type EnvConfig = {
   botToken: string;
-  publicBaseUrl: string;
-  databaseUrl: string;
+  publicUrl: string;
   defaultTimezone: string;
   screenshotCooldownSec: number;
   maxSendsPerTick: number;
@@ -29,22 +28,15 @@ const parseNumber = (value: string, key: string): number => {
 
 export const loadConfig = (): EnvConfig => {
   const botToken = requireEnv("BOT_TOKEN");
-  const publicBaseUrl = requireEnv("PUBLIC_BASE_URL");
-  const databaseUrl = requireEnv("DATABASE_URL");
-  const defaultTimezone = process.env.DEFAULT_TIMEZONE ?? "Asia/Baku";
-  const screenshotCooldownSec = parseNumber(
-    process.env.SCREENSHOT_COOLDOWN_SEC ?? "30",
-    "SCREENSHOT_COOLDOWN_SEC"
-  );
-  const maxSendsPerTick = parseNumber(
-    process.env.MAX_SENDS_PER_TICK ?? "20",
-    "MAX_SENDS_PER_TICK"
-  );
+  const publicUrl = requireEnv("PUBLIC_URL");
+  requireEnv("DATABASE_URL");
+  const defaultTimezone = "Asia/Baku";
+  const screenshotCooldownSec = parseNumber("30", "SCREENSHOT_COOLDOWN_SEC");
+  const maxSendsPerTick = parseNumber("20", "MAX_SENDS_PER_TICK");
 
   return {
     botToken,
-    publicBaseUrl,
-    databaseUrl,
+    publicUrl,
     defaultTimezone,
     screenshotCooldownSec,
     maxSendsPerTick,

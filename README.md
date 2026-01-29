@@ -6,7 +6,7 @@ Telegram bot + scheduler برای ارسال خودکار چارت Cloudflare Ra
 - Express health route و webhook
 - Reply keyboard فارسی با ایموجی‌ها
 - مدیریت مقصدها و بازه ارسال از داخل ربات
-- اسکرین‌شات با Playwright (عنصر چارت با fallback)
+- تولید PNG چارت با QuickChart + Radar API
 - زمان‌بندی دقیقه‌ای + جلوگیری از هم‌پوشانی
 
 ## Requirements
@@ -25,16 +25,11 @@ Telegram bot + scheduler برای ارسال خودکار چارت Cloudflare Ra
 متغیرهای الزامی:
 ```
 BOT_TOKEN=...
-PUBLIC_BASE_URL=https://your-service.onrender.com
+PUBLIC_URL=https://your-service.onrender.com
 DATABASE_URL=postgresql://...
 ```
 
-متغیرهای اختیاری:
-```bash
-DEFAULT_TIMEZONE=Asia/Baku
-SCREENSHOT_COOLDOWN_SEC=30
-MAX_SENDS_PER_TICK=20
-```
+توکن Radar API را داخل منوی ربات تنظیم کنید.
 
 ### 4) مهاجرت Prisma
 ```bash
@@ -50,7 +45,7 @@ npm run dev
 ## Webhook
 Webhook به صورت خودکار در استارت ست می‌شود:
 ```
-${PUBLIC_BASE_URL}/telegram/webhook
+${PUBLIC_URL}/telegram
 ```
 
 ## Targets
@@ -64,13 +59,14 @@ ${PUBLIC_BASE_URL}/telegram/webhook
 3. فقط این env vars را تنظیم کنید (Internal Database URL را استفاده کن):
    ```bash
    BOT_TOKEN=...
-   PUBLIC_BASE_URL=https://your-service.onrender.com
+   PUBLIC_URL=https://your-service.onrender.com
    DATABASE_URL=postgresql://...
    ```
 4. Deploy as Docker.
 5. Bot را به کانال/گروه اضافه کن و Admin کن.
 6. از داخل ربات:
    - یک پیام از کانال/گروه به ربات Forward کن تا مقصد اضافه شود.
+   - توکن Radar API را از منو تنظیم کن.
    - بازه ارسال را تنظیم کن و مقصد را فعال نگه دار.
 
 ## Health Check

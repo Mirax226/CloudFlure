@@ -2,9 +2,15 @@ import type { Bot, Context } from "grammy";
 import type { PrismaClient } from "@prisma/client";
 import { TargetChatType } from "@prisma/client";
 import { labels, buildMainKeyboard } from "./keyboards.js";
+import { setRadarApiToken } from "../db/settings.js";
 
 export type SessionData = {
-  step?: "awaitingTargetForward" | "awaitingTargetSelection" | "awaitingInterval" | null;
+  step?:
+    | "awaitingTargetForward"
+    | "awaitingTargetSelection"
+    | "awaitingInterval"
+    | "awaitingRadarToken"
+    | null;
 };
 
 type BotContext = Context & { session: SessionData };
@@ -87,6 +93,7 @@ const showHelp = async (ctx: Context) => {
       "برای افزودن مقصد، روی ➕ بزن و از کانال/گروه برام پیام فوروارد کن 📩",
       "برای تنظیم بازه ارسال باید اول مقصد رو انتخاب کنی 🎯",
       "بعد از انتخاب مقصد، بازه رو با عدد دقیقه یا فرمت 2h/45m ارسال کن ⏱",
+      "برای دریافت دیتا، اول توکن Radar API رو از منو تنظیم کن 🗝️",
     ].join("\n"),
     { reply_markup: buildMainKeyboard() }
   );
@@ -196,6 +203,14 @@ export const registerMenuHandlers = (
       `وضعیت مقصد شد: ${updated.isEnabled ? "فعال ✅" : "غیرفعال ⛔"}`,
       { reply_markup: buildMainKeyboard() }
     );
+  });
+
+  bot.hears(labels.setRadarToken, async (ctx: BotContext) => {
+    await ensureUser(ctx, prisma);
+    ctx.session.step = "awaitingRadarToken";
+    await ctx.reply("توکن Radar API رو ارسال کن 🗝️", {
+      reply_markup: buildMainKeyboard(),
+    });
   });
 
   bot.hears(labels.help, async (ctx: BotContext) => {
@@ -314,6 +329,14 @@ export const registerMenuHandlers = (
         reply_markup: buildMainKeyboard(),
       });
       return;
+    }
+
+    if (ctx.session.step === "awaitingRadarToken") {
+      await setRadarApiToken(prisma, text);
+      ctx.session.step = null;
+      await ctx.reply("توکن Radar API ذخیره شد ✅", {
+        reply_markup: buildMainKeyboard(),
+      });
     }
   });
 };

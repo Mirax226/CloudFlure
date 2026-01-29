@@ -3,6 +3,7 @@ import { SendStatus } from "@prisma/client";
 import type { EnvConfig } from "../config.js";
 import { generateRadarChartPng } from "../radar/generate.js";
 import { logError } from "../logger.js";
+import { getRadarApiToken } from "../db/settings.js";
 
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const BASE_RETRY_MINUTES = 10;
@@ -75,6 +76,12 @@ export const runSchedulerTick = async (
       return;
     }
 
+    const radarToken = await getRadarApiToken(prisma);
+    if (!radarToken) {
+      await logError("scheduler_missing_radar_token", { scope: "scheduler_token_missing" });
+      return;
+    }
+
     const pendingSchedules = dueSchedules.slice(0, config.maxSendsPerTick);
     if (dueSchedules.length > pendingSchedules.length) {
       console.log("scheduler_tick_rate_limited", {
@@ -85,7 +92,7 @@ export const runSchedulerTick = async (
 
     let buffer: Buffer;
     try {
-      buffer = await generateRadarChartPng(config.defaultTimezone);
+      buffer = await generateRadarChartPng(radarToken, config.defaultTimezone);
     } catch (error) {
       await logError("Scheduler capture failed", { scope: "scheduler_capture_failed", error });
       const retryUpdates = pendingSchedules.map((schedule) => {
@@ -141,7 +148,7 @@ export const runSchedulerTick = async (
             targetChatId: schedule.targetChatId,
             sentAt,
             status: SendStatus.FAIL,
-            error: error instanceof Error ? error.message : "Unknown error",
+            error: error instanceof Error ? error.stack ?? error.message : "Unknown error",
           },
         });
       }

@@ -1,11 +1,15 @@
-import axios from "axios";
+import axios, { type AxiosInstance } from "axios";
+import { logError } from "../logger.js";
 
 export type RadarTimeseriesPoint = {
   timestamp: string;
   value: number;
 };
 
-const RADAR_API_URL = "https://api.cloudflare.com/client/v4/radar/traffic";
+const RADAR_BASE_URL = "https://api.cloudflare.com/client/v4/radar";
+const REQUEST_TIMEOUT_MS = 20_000;
+const MAX_RETRIES = 2;
+const RETRY_DELAY_MS = 600;
 
 const normalizeTimestamp = (value: unknown): string | null => {
   if (!value) {
@@ -85,22 +89,57 @@ const extractTimeseries = (payload: unknown): RadarTimeseriesPoint[] => {
   return [];
 };
 
-export const fetchIranTimeseries = async (): Promise<RadarTimeseriesPoint[]> => {
-  const response = await axios.get(RADAR_API_URL, {
-    params: {
-      dateRange: "1d",
-      location: "IR",
-      format: "json",
-    },
+const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const createRadarClient = (token: string): AxiosInstance => {
+  return axios.create({
+    baseURL: RADAR_BASE_URL,
+    timeout: REQUEST_TIMEOUT_MS,
     headers: {
+      Authorization: `Bearer ${token}`,
       "User-Agent": "CloudFlureBot/1.0",
     },
-    timeout: 15_000,
   });
+};
 
-  const points = extractTimeseries(response.data);
-  if (!points.length) {
-    throw new Error("Radar API returned no timeseries data");
+export const fetchIranTimeseries = async (token: string): Promise<RadarTimeseriesPoint[]> => {
+  const client = createRadarClient(token);
+  const params = {
+    dateRange: "1d",
+    location: "IR",
+  };
+  let lastError: unknown;
+
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt += 1) {
+    try {
+      const response = await client.get("/http/timeseries", { params });
+      const points = extractTimeseries(response.data);
+      if (!points.length) {
+        throw new Error("Radar API returned no timeseries data");
+      }
+      return points;
+    } catch (error) {
+      lastError = error;
+      if (axios.isAxiosError(error) && error.response) {
+        const status = error.response.status;
+        const responseData = error.response.data;
+        if (status >= 400 && status < 500) {
+          await logError("radar_api_4xx", {
+            status,
+            responseData,
+            params,
+            endpoint: "/http/timeseries",
+          });
+          throw error;
+        }
+      }
+      if (attempt < MAX_RETRIES) {
+        await delay(RETRY_DELAY_MS * (attempt + 1));
+        continue;
+      }
+      break;
+    }
   }
-  return points;
+
+  throw lastError instanceof Error ? lastError : new Error("Radar API request failed");
 };
