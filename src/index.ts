@@ -20,11 +20,6 @@ app.get("/health", (_req: Request, res: Response) => {
   res.send("ok");
 });
 
-app.post("/telegram/webhook", async (req: Request, res: Response) => {
-  await bot.handleUpdate(req.body);
-  res.send("ok");
-});
-
 const port = Number(process.env.PORT) || 3000;
 
 const start = async () => {
@@ -35,6 +30,14 @@ const start = async () => {
     console.error("DB connection failed", { error });
     process.exit(1);
   }
+
+  await bot.init();
+  console.log("Bot initialized");
+
+  app.post("/telegram/webhook", async (req: Request, res: Response) => {
+    await bot.handleUpdate(req.body);
+    res.send("ok");
+  });
 
   const webhookUrl = `${config.publicBaseUrl}/telegram/webhook`;
   await bot.api.setWebhook(webhookUrl);
