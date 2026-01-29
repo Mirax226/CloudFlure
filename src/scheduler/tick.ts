@@ -74,7 +74,13 @@ export const runSchedulerTick = async (
       });
     }
 
-    const buffer = await captureRadarChart();
+    let buffer: Buffer;
+    try {
+      buffer = await captureRadarChart();
+    } catch (error) {
+      await logError("Scheduler capture failed", { scope: "scheduler_capture_failed", error });
+      return;
+    }
     const caption = `Cloudflare Radar 🇮🇷\n${formatTimestamp(config.defaultTimezone)}`;
 
     for (const schedule of pendingSchedules) {
