@@ -1,5 +1,4 @@
-import { ChartJSNodeCanvas } from "chartjs-node-canvas";
-import type { ChartConfiguration } from "chart.js";
+import axios from "axios";
 import { fetchIranTimeseries, type RadarTimeseriesPoint } from "./fetch.js";
 
 const WIDTH = 1280;
@@ -37,17 +36,15 @@ const downsample = (points: RadarTimeseriesPoint[], maxPoints: number): RadarTim
   return points.filter((_, index) => index % step === 0);
 };
 
-export const generateRadarChartPng = async (timezone: string): Promise<Buffer> => {
-  const points = downsample(await fetchIranTimeseries(), MAX_POINTS);
+export const generateRadarChartPng = async (
+  token: string,
+  timezone: string
+): Promise<Buffer> => {
+  const points = downsample(await fetchIranTimeseries(token), MAX_POINTS);
   const labels = points.map((point) => formatLabel(point.timestamp, timezone));
   const data = points.map((point) => point.value);
-  const chartJSNodeCanvas = new ChartJSNodeCanvas({
-    width: WIDTH,
-    height: HEIGHT,
-    backgroundColour: "white",
-  });
 
-  const configuration: ChartConfiguration<"line"> = {
+  const configuration = {
     type: "line",
     data: {
       labels,
@@ -92,5 +89,17 @@ export const generateRadarChartPng = async (timezone: string): Promise<Buffer> =
     },
   };
 
-  return chartJSNodeCanvas.renderToBuffer(configuration, "image/png");
+  const response = await axios.post(
+    "https://quickchart.io/chart",
+    {
+      chart: configuration,
+      format: "png",
+      width: WIDTH,
+      height: HEIGHT,
+      backgroundColor: "white",
+    },
+    { responseType: "arraybuffer", timeout: 20_000 }
+  );
+
+  return Buffer.from(response.data);
 };

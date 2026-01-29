@@ -9,8 +9,6 @@ RUN npm install
 COPY prisma ./prisma
 RUN npx prisma generate
 
-RUN npx playwright install --with-deps chromium
-
 COPY tsconfig.json ./
 COPY src ./src
 

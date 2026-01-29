@@ -5,6 +5,7 @@ import type { EnvConfig } from "./config.js";
 import { generateRadarChartPng } from "./radar/generate.js";
 import { registerMenuHandlers, type SessionData } from "./ui/menus.js";
 import { logError } from "./logger.js";
+import { getRadarApiToken } from "./db/settings.js";
 
 export type BotState = {
   lastSendByUserId: Map<number, number>;
@@ -69,6 +70,12 @@ export const createBot = (prisma: PrismaClient, config: EnvConfig, state: BotSta
       return;
     }
 
+    const radarToken = await getRadarApiToken(prisma);
+    if (!radarToken) {
+      await ctx.reply("اول از منو 🗝️ توکن Radar API رو تنظیم کن.");
+      return;
+    }
+
     const selectedTarget = user.selectedTargetId
       ? await prisma.targetChat.findUnique({ where: { id: user.selectedTargetId } })
       : null;
@@ -79,7 +86,7 @@ export const createBot = (prisma: PrismaClient, config: EnvConfig, state: BotSta
     void (async () => {
       let buffer: Buffer;
       try {
-        buffer = await generateRadarChartPng(config.defaultTimezone);
+        buffer = await generateRadarChartPng(radarToken, config.defaultTimezone);
       } catch (error) {
         await logError("send_now_chart_failed", { tgUserId, error });
         await ctx.reply("چارت آماده نشد. لطفاً دوباره امتحان کن.");

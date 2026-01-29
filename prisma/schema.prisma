@@ -64,3 +64,10 @@ model SendLog {
   status       SendStatus
   error        String?
 }
+
+model AppSetting {
+  id             Int      @id @default(autoincrement())
+  radarApiToken  String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+}
