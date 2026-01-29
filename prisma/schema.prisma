@@ -45,6 +45,8 @@ model TargetSchedule {
   targetChat      TargetChat @relation(fields: [targetChatId], references: [id])
   intervalMinutes Int
   lastSentAt      DateTime?
+  nextRetryAt     DateTime?
+  retryCount      Int       @default(0)
   createdAt       DateTime  @default(now())
   updatedAt       DateTime  @updatedAt
 }

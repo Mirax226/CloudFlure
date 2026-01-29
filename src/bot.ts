@@ -2,8 +2,9 @@ import { Bot, InputFile, session } from "grammy";
 import type { Context } from "grammy";
 import type { PrismaClient } from "@prisma/client";
 import type { EnvConfig } from "./config.js";
-import { captureRadarChart } from "./screenshot/capture.js";
+import { generateRadarChartPng } from "./radar/generate.js";
 import { registerMenuHandlers, type SessionData } from "./ui/menus.js";
+import { logError } from "./logger.js";
 
 export type BotState = {
   lastSendByUserId: Map<number, number>;
@@ -30,6 +31,13 @@ export const createBot = (prisma: PrismaClient, config: EnvConfig, state: BotSta
       initial: (): SessionData => ({ step: null }),
     })
   );
+
+  bot.catch((error) => {
+    void logError("bot_handler_failed", {
+      updateId: error.ctx?.update?.update_id,
+      error: error.error,
+    });
+  });
 
   const sendChartToChat = async (chatId: bigint | number, caption: string, buffer: Buffer) => {
     const photo = new InputFile(buffer, "radar.png");
@@ -66,24 +74,31 @@ export const createBot = (prisma: PrismaClient, config: EnvConfig, state: BotSta
       : null;
     const shouldSendToTarget = Boolean(selectedTarget?.isEnabled);
 
-    let buffer: Buffer;
-    try {
-      buffer = await captureRadarChart();
-    } catch (error) {
-      console.warn("send_now_capture_failed", {
-        tgUserId,
-        error: error instanceof Error ? error.message : error,
-      });
-      await ctx.reply("⏳ الان رادار دیر لود شد. لطفاً دوباره امتحان کن.");
-      return;
-    }
-    state.lastSendByUserId.set(tgUserId, now);
-    const caption = `Cloudflare Radar 🇮🇷\n${formatTimestamp(config.defaultTimezone)}`;
-    await sendChartToChat(privateChatId, caption, buffer);
-    if (shouldSendToTarget && selectedTarget) {
-      await sendChartToChat(selectedTarget.chatId, caption, buffer);
-    }
-    await ctx.reply("چارت ارسال شد ✅");
+    await ctx.reply("⏳ در حال آماده‌سازی چارت…");
+
+    void (async () => {
+      let buffer: Buffer;
+      try {
+        buffer = await generateRadarChartPng(config.defaultTimezone);
+      } catch (error) {
+        await logError("send_now_chart_failed", { tgUserId, error });
+        await ctx.reply("چارت آماده نشد. لطفاً دوباره امتحان کن.");
+        return;
+      }
+
+      const caption = `Cloudflare Radar 🇮🇷\n${formatTimestamp(config.defaultTimezone)}`;
+      try {
+        await sendChartToChat(privateChatId, caption, buffer);
+        if (shouldSendToTarget && selectedTarget) {
+          await sendChartToChat(selectedTarget.chatId, caption, buffer);
+        }
+        state.lastSendByUserId.set(tgUserId, Date.now());
+        await ctx.reply("چارت ارسال شد ✅");
+      } catch (error) {
+        await logError("send_now_send_failed", { tgUserId, error });
+        await ctx.reply("ارسال چارت ناموفق بود. لطفاً دوباره امتحان کن.");
+      }
+    })();
   };
 
   registerMenuHandlers(bot, { prisma, sendNow });
