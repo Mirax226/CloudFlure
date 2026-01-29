@@ -3,20 +3,21 @@ import { loadConfig } from "./config.js";
 import { prisma } from "./db/prisma.js";
 import { createBot, type BotState } from "./bot.js";
 import { runSchedulerTick } from "./scheduler/tick.js";
-import { logError, logInfo } from "./logger.js";
+import { logError, logInfo, logWarn } from "./logger.js";
 
 const config = loadConfig();
 console.log("Config loaded", {
   publicUrl: config.publicUrl,
   maxSendsPerTick: config.maxSendsPerTick,
+  radarMode: config.radar.mode,
 });
 
-process.on("uncaughtException", async (error) => {
+process.on("uncaughtException", async (error: unknown) => {
   await logError("Unhandled error", error);
   process.exit(1);
 });
 
-process.on("unhandledRejection", async (reason) => {
+process.on("unhandledRejection", async (reason: unknown) => {
   await logError("Unhandled error", reason);
   process.exit(1);
 });
@@ -27,11 +28,21 @@ app.use(express.json());
 const botState: BotState = { lastSendByUserId: new Map() };
 const { bot, sendChartToChat } = createBot(prisma, config, botState);
 
-app.get("/health", (_req: Request, res: Response) => {
-  res.send("ok");
+const version = process.env.npm_package_version ?? "unknown";
+
+app.get("/health", async (_req: Request, res: Response) => {
+  const time = new Date().toISOString();
+  let dbStatus = "ok";
+  try {
+    await prisma.$queryRaw`SELECT 1`;
+  } catch (error) {
+    dbStatus = "error";
+    await logError("health_db_check_failed", { error });
+  }
+  res.json({ ok: dbStatus === "ok", time, version, db: dbStatus });
 });
 
-const port = Number(process.env.PORT) || 3000;
+const port = Number(process.env.PORT) || 10000;
 
 const start = async () => {
   try {
@@ -45,19 +56,24 @@ const start = async () => {
   await bot.init();
   console.log("Bot initialized");
 
-  app.post("/telegram", (req: Request, res: Response) => {
-    res.send("ok");
-    console.log("telegram_update_received", {
-      updateType: Object.keys(req.body ?? {})[0] ?? "unknown",
+  if (config.publicUrl) {
+    app.post("/telegram", (req: Request, res: Response) => {
+      res.send("ok");
+      console.log("telegram_update_received", {
+        updateType: Object.keys(req.body ?? {})[0] ?? "unknown",
+      });
+      void bot.handleUpdate(req.body).catch((error) => {
+        void logError("webhook_update_failed", { error });
+      });
     });
-    void bot.handleUpdate(req.body).catch((error) => {
-      void logError("webhook_update_failed", { error });
-    });
-  });
 
-  const webhookUrl = `${config.publicUrl}/telegram`;
-  await bot.api.setWebhook(webhookUrl);
-  console.log(`Webhook set to ${webhookUrl}`);
+    const webhookUrl = `${config.publicUrl}/telegram`;
+    await bot.api.setWebhook(webhookUrl);
+    console.log(`Webhook set to ${webhookUrl}`);
+  } else {
+    await logWarn("PUBLIC_URL missing, falling back to long polling");
+    void bot.start();
+  }
 
   const schedulerState = { isTickRunning: false };
   const tick = async () => {

@@ -25,30 +25,35 @@ enum TargetChatType {
 }
 
 model TargetChat {
-  id              Int            @id @default(autoincrement())
-  chatId          BigInt         @unique
-  title           String?
-  type            TargetChatType
-  createdByUserId Int
-  createdByUser   User           @relation("UserCreatedTargets", fields: [createdByUserId], references: [id])
-  selectedByUsers User[]         @relation("UserSelectedTarget")
-  isEnabled       Boolean        @default(true)
-  schedule        TargetSchedule?
-  sendLogs        SendLog[]
-  createdAt       DateTime       @default(now())
-  updatedAt       DateTime       @updatedAt
+  id                 Int            @id @default(autoincrement())
+  chatId             BigInt         @unique
+  title              String?
+  type               TargetChatType
+  createdByUserId    Int
+  createdByUser      User           @relation("UserCreatedTargets", fields: [createdByUserId], references: [id])
+  selectedByUsers    User[]         @relation("UserSelectedTarget")
+  isEnabled          Boolean        @default(true)
+  schedule           TargetSchedule?
+  sendLogs           SendLog[]
+  lastErrorAt        DateTime?
+  lastSuccessAt      DateTime?
+  failCount          Int            @default(0)
+  notifyCooldownUntil DateTime?
+  createdAt          DateTime       @default(now())
+  updatedAt          DateTime       @updatedAt
 }
 
 model TargetSchedule {
-  id              Int       @id @default(autoincrement())
-  targetChatId    Int       @unique
+  id              Int        @id @default(autoincrement())
+  targetChatId    Int        @unique
   targetChat      TargetChat @relation(fields: [targetChatId], references: [id])
-  intervalMinutes Int
+  intervalMinutes Int        @default(60)
   lastSentAt      DateTime?
   nextRetryAt     DateTime?
-  retryCount      Int       @default(0)
-  createdAt       DateTime  @default(now())
-  updatedAt       DateTime  @updatedAt
+  retryCount      Int        @default(0)
+  inProgressUntil DateTime?
+  createdAt       DateTime   @default(now())
+  updatedAt       DateTime   @updatedAt
 }
 
 enum SendStatus {
@@ -68,6 +73,7 @@ model SendLog {
 model AppSetting {
   id             Int      @id @default(autoincrement())
   radarApiToken  String?
+  radarMode      String?
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
 }
