@@ -9,6 +9,18 @@ type EnvConfig = {
   defaultTimezone: string;
   screenshotCooldownSec: number;
   maxSendsPerTick: number;
+  pathApplier: PathApplierConfig;
+};
+
+type LogLevel = "info" | "warn" | "error";
+
+type PathApplierConfig = {
+  enabled: boolean;
+  url: string;
+  token: string;
+  projectName: string;
+  logLevel: LogLevel;
+  pingEnabled: boolean;
 };
 
 const requireEnv = (key: string): string => {
@@ -27,6 +39,13 @@ const parseNumber = (value: string, key: string): number => {
   return parsed;
 };
 
+const parseLogLevel = (value: string | undefined): LogLevel => {
+  if (value === "error" || value === "warn" || value === "info") {
+    return value;
+  }
+  return "info";
+};
+
 export const loadConfig = (): EnvConfig => {
   const botToken = requireEnv("BOT_TOKEN");
   const publicBaseUrl = requireEnv("PUBLIC_BASE_URL");
@@ -40,6 +59,14 @@ export const loadConfig = (): EnvConfig => {
     process.env.MAX_SENDS_PER_TICK ?? "20",
     "MAX_SENDS_PER_TICK"
   );
+  const pathApplierUrl = process.env.PATH_APPLIER_URL?.trim() ?? "";
+  const pathApplierToken = process.env.PATH_APPLIER_TOKEN?.trim() ?? "";
+  const pathApplierProjectName = process.env.PROJECT_NAME?.trim() ?? "Project X";
+  const pathApplierLogLevel = parseLogLevel(process.env.LOG_LEVEL);
+  const pathApplierEnabled = Boolean(
+    pathApplierUrl && pathApplierToken && pathApplierProjectName
+  );
+  const pathApplierPingEnabled = process.env.PATH_APPLIER_PING === "true";
 
   return {
     botToken,
@@ -48,7 +75,15 @@ export const loadConfig = (): EnvConfig => {
     defaultTimezone,
     screenshotCooldownSec,
     maxSendsPerTick,
+    pathApplier: {
+      enabled: pathApplierEnabled,
+      url: pathApplierUrl,
+      token: pathApplierToken,
+      projectName: pathApplierProjectName,
+      logLevel: pathApplierLogLevel,
+      pingEnabled: pathApplierPingEnabled,
+    },
   };
 };
 
-export type { EnvConfig };
+export type { EnvConfig, LogLevel, PathApplierConfig };

@@ -2,6 +2,7 @@ import type { PrismaClient } from "@prisma/client";
 import { SendStatus } from "@prisma/client";
 import type { EnvConfig } from "../config.js";
 import { captureRadarChart } from "../screenshot/capture.js";
+import { logError } from "../logger.js";
 
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -94,7 +95,7 @@ export const runSchedulerTick = async (
         });
         await delay(200);
       } catch (error) {
-        console.error("scheduler_send_failed", { error });
+        await logError(error, { scope: "scheduler_send_failed" });
         await prisma.sendLog.create({
           data: {
             targetChatId: schedule.targetChatId,
