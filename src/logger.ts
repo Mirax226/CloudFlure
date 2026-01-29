@@ -10,12 +10,6 @@ type LogPayload = {
   timestamp: string;
 };
 
-const levelPriority: Record<LogLevel, number> = {
-  error: 0,
-  warn: 1,
-  info: 2,
-};
-
 let cachedConfig: PathApplierConfig | null = null;
 
 const getPathApplierConfig = (): PathApplierConfig => {
@@ -25,8 +19,17 @@ const getPathApplierConfig = (): PathApplierConfig => {
   return cachedConfig;
 };
 
-const shouldSend = (level: LogLevel, config: PathApplierConfig): boolean => {
-  return levelPriority[level] <= levelPriority[config.logLevel];
+const requirePathApplierConfigValue = (value: string, message: string): void => {
+  if (!value.trim()) {
+    console.error(message);
+    throw new Error(message);
+  }
+};
+
+const validatePathApplierConfig = (config: PathApplierConfig): void => {
+  requirePathApplierConfigValue(config.url, "Path-Applier URL not configured");
+  requirePathApplierConfigValue(config.token, "Path-Applier token not configured");
+  requirePathApplierConfigValue(config.projectName, "Project name not configured");
 };
 
 const formatErrorDetails = (error: unknown): LogMeta => {
@@ -58,14 +61,10 @@ const sendToPathApplier = async (
   config: PathApplierConfig,
   payload: LogPayload
 ): Promise<void> => {
-  if (!config.enabled) {
-    return;
-  }
-
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 5000);
   try {
-    await fetch(`${config.url}/api/logs`, {
+    await fetch(config.url, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${config.token}`,
@@ -75,7 +74,7 @@ const sendToPathApplier = async (
       signal: controller.signal,
     });
   } catch (error) {
-    console.warn("path_applier_log_failed", {
+    console.log("path_applier_log_failed", {
       error: error instanceof Error ? error.message : String(error),
     });
   } finally {
@@ -83,57 +82,82 @@ const sendToPathApplier = async (
   }
 };
 
+const stringifyMetaValue = (value: unknown): string => {
+  if (typeof value === "string") {
+    return value;
+  }
+  if (value instanceof Error) {
+    return value.message;
+  }
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+};
+
+const formatLogOutput = (
+  config: PathApplierConfig,
+  level: LogLevel,
+  message: string,
+  meta: LogMeta
+): string => {
+  const header = `[${config.projectName.toUpperCase()}][${level.toUpperCase()}]`;
+  const metaEntries = Object.entries(meta);
+  const metaLines =
+    metaEntries.length === 0
+      ? ["Meta:", "- (none)"]
+      : ["Meta:", ...metaEntries.map(([key, value]) => `- ${key}: ${stringifyMetaValue(value)}`)];
+  return [header, `Message: ${message}`, ...metaLines].join("\n");
+};
+
+const normalizeMeta = (meta?: unknown): LogMeta => {
+  if (!meta) {
+    return {};
+  }
+  if (meta instanceof Error) {
+    return { error: formatErrorDetails(meta) };
+  }
+  if (typeof meta === "object" && !Array.isArray(meta)) {
+    const record = meta as LogMeta;
+    if (record.error instanceof Error) {
+      return { ...record, error: formatErrorDetails(record.error) };
+    }
+    return record;
+  }
+  return { meta };
+};
+
 export const logInfo = async (message: string, meta?: LogMeta): Promise<void> => {
-  if (meta) {
-    console.log(message, meta);
-  } else {
-    console.log(message);
-  }
-
   const config = getPathApplierConfig();
-  if (!shouldSend("info", config)) {
-    return;
-  }
+  validatePathApplierConfig(config);
+  const payloadMeta = normalizeMeta(meta);
+  console.log(formatLogOutput(config, "info", message, payloadMeta));
 
-  await sendToPathApplier(config, buildPayload(config, "info", message, meta ?? {}));
+  await sendToPathApplier(config, buildPayload(config, "info", message, payloadMeta));
 };
 
 export const logWarn = async (message: string, meta?: LogMeta): Promise<void> => {
-  if (meta) {
-    console.warn(message, meta);
-  } else {
-    console.warn(message);
-  }
-
   const config = getPathApplierConfig();
-  if (!shouldSend("warn", config)) {
-    return;
-  }
+  validatePathApplierConfig(config);
+  const payloadMeta = normalizeMeta(meta);
+  console.warn(formatLogOutput(config, "warn", message, payloadMeta));
 
-  await sendToPathApplier(config, buildPayload(config, "warn", message, meta ?? {}));
+  await sendToPathApplier(config, buildPayload(config, "warn", message, payloadMeta));
 };
 
-export const logError = async (error: unknown, meta?: LogMeta): Promise<void> => {
-  console.error(error, meta);
-
+export const logError = async (message: string, meta?: unknown): Promise<void> => {
   const config = getPathApplierConfig();
-  if (!shouldSend("error", config)) {
-    return;
-  }
-
-  const errorDetails = formatErrorDetails(error);
-  const message =
-    typeof errorDetails.message === "string" ? errorDetails.message : "Unknown error";
-  const payloadMeta = { ...meta, error: errorDetails };
+  validatePathApplierConfig(config);
+  const payloadMeta = normalizeMeta(meta);
+  console.error(formatLogOutput(config, "error", message, payloadMeta));
 
   await sendToPathApplier(config, buildPayload(config, "error", message, payloadMeta));
 };
 
 export const sendPingTest = async (): Promise<void> => {
   const config = getPathApplierConfig();
+  validatePathApplierConfig(config);
   const message = "Ping test from Project X";
-  console.log(message);
-
-  const payload = buildPayload(config, "info", message, {});
-  await sendToPathApplier(config, payload);
+  await logInfo(message);
 };
