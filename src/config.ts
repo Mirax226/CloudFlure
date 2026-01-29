@@ -31,6 +31,15 @@ const requireEnv = (key: string): string => {
   return value;
 };
 
+const requirePathApplierEnv = (key: string, message: string): string => {
+  const value = process.env[key]?.trim();
+  if (!value) {
+    console.error(message);
+    throw new Error(message);
+  }
+  return value;
+};
+
 const parseNumber = (value: string, key: string): number => {
   const parsed = Number(value);
   if (Number.isNaN(parsed)) {
@@ -59,13 +68,20 @@ export const loadConfig = (): EnvConfig => {
     process.env.MAX_SENDS_PER_TICK ?? "20",
     "MAX_SENDS_PER_TICK"
   );
-  const pathApplierUrl = process.env.PATH_APPLIER_URL?.trim() ?? "";
-  const pathApplierToken = process.env.PATH_APPLIER_TOKEN?.trim() ?? "";
-  const pathApplierProjectName = process.env.PROJECT_NAME?.trim() ?? "Project X";
-  const pathApplierLogLevel = parseLogLevel(process.env.LOG_LEVEL);
-  const pathApplierEnabled = Boolean(
-    pathApplierUrl && pathApplierToken && pathApplierProjectName
+  const pathApplierUrl = requirePathApplierEnv(
+    "PATH_APPLIER_URL",
+    "Path-Applier URL not configured"
   );
+  const pathApplierToken = requirePathApplierEnv(
+    "PATH_APPLIER_TOKEN",
+    "Path-Applier token not configured"
+  );
+  const pathApplierProjectName = requirePathApplierEnv(
+    "PROJECT_NAME",
+    "Project name not configured"
+  );
+  const pathApplierLogLevel = parseLogLevel(process.env.LOG_LEVEL);
+  const pathApplierEnabled = true;
   const pathApplierPingEnabled = process.env.PATH_APPLIER_PING === "true";
 
   return {

@@ -95,7 +95,7 @@ export const runSchedulerTick = async (
         });
         await delay(200);
       } catch (error) {
-        await logError(error, { scope: "scheduler_send_failed" });
+        await logError("Scheduler send failed", { scope: "scheduler_send_failed", error });
         await prisma.sendLog.create({
           data: {
             targetChatId: schedule.targetChatId,

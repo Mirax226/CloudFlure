@@ -3,7 +3,7 @@ import { loadConfig } from "./config.js";
 import { prisma } from "./db/prisma.js";
 import { createBot, type BotState } from "./bot.js";
 import { runSchedulerTick } from "./scheduler/tick.js";
-import { logError, sendPingTest } from "./logger.js";
+import { logError, logInfo, sendPingTest } from "./logger.js";
 
 const config = loadConfig();
 console.log("Config loaded", {
@@ -12,12 +12,12 @@ console.log("Config loaded", {
 });
 
 process.on("uncaughtException", async (error) => {
-  await logError(error, { scope: "uncaughtException" });
+  await logError("Unhandled error", error);
   process.exit(1);
 });
 
 process.on("unhandledRejection", async (reason) => {
-  await logError(reason, { scope: "unhandledRejection" });
+  await logError("Unhandled error", reason);
   process.exit(1);
 });
 
@@ -42,7 +42,7 @@ const start = async () => {
     await prisma.$connect();
     console.log("DB connected");
   } catch (error) {
-    await logError(error, { scope: "db_connection" });
+    await logError("Database connection failed", { scope: "db_connection", error });
     process.exit(1);
   }
 
@@ -69,9 +69,11 @@ const start = async () => {
   app.listen(port, () => {
     console.log(`server_listening:${port}`);
   });
+
+  await logInfo("Server started", { port });
 };
 
 start().catch(async (error) => {
-  await logError(error, { scope: "startup" });
+  await logError("Startup failed", { scope: "startup", error });
   process.exit(1);
 });
