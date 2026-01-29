@@ -4,47 +4,86 @@ const RADAR_URL = "https://radar.cloudflare.com/ir?dateRange=1d";
 
 export const captureRadarChart = async (): Promise<Buffer> => {
   const browser = await chromium.launch({ headless: true });
-  const context = await browser.newContext({ viewport: { width: 1365, height: 768 } });
+  const retryDelaysMs = [0, 2000, 5000];
+  let lastError: unknown;
 
-  const page = await context.newPage();
+  const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-  await page.goto(RADAR_URL, { waitUntil: "networkidle" });
-  await page.waitForTimeout(3000);
+  for (let attempt = 0; attempt < retryDelaysMs.length; attempt += 1) {
+    if (retryDelaysMs[attempt] > 0) {
+      await delay(retryDelaysMs[attempt]);
+    }
 
-  const selectors = [
-    "main section:has(canvas)",
-    "main [data-testid*='chart']",
-    "main [class*='chart']",
-  ];
+    const context = await browser.newContext({ viewport: { width: 1365, height: 768 } });
+    const page = await context.newPage();
+    page.setDefaultNavigationTimeout(90_000);
+    page.setDefaultTimeout(90_000);
 
-  for (const selector of selectors) {
-    const locator = page.locator(selector).first();
+    await page.route("**/*", (route) => {
+      const type = route.request().resourceType();
+      const url = route.request().url();
+      if (["font", "media"].includes(type) || url.includes("analytics") || url.includes("beacon")) {
+        return route.abort();
+      }
+      return route.continue();
+    });
+
     try {
-      if (await locator.count()) {
-        const box = await locator.boundingBox();
-        if (box) {
+      await page.goto(RADAR_URL, { waitUntil: "domcontentloaded" });
+      await page.waitForTimeout(3000);
+
+      const selectors = [
+        "main section:has(canvas)",
+        "main [data-testid*='chart']",
+        "main [class*='chart']",
+      ];
+
+      for (const selector of selectors) {
+        const locator = page.locator(selector).first();
+        try {
+          await locator.waitFor({ state: "visible", timeout: 15_000 });
           const buffer = await locator.screenshot({ type: "png" });
+          await page.close();
+          await context.close();
           await browser.close();
           return buffer;
+        } catch {
+          // continue to fallback
         }
       }
-    } catch {
-      // continue to fallback
-    }
-  }
 
-  const fallbackLocator = page.locator("main").first();
-  try {
-    if (await fallbackLocator.count()) {
-      const buffer = await fallbackLocator.screenshot({ type: "png" });
+      const fallbackLocator = page.locator("main").first();
+      try {
+        await fallbackLocator.waitFor({ state: "visible", timeout: 10_000 });
+        const buffer = await fallbackLocator.screenshot({ type: "png" });
+        await page.close();
+        await context.close();
+        await browser.close();
+        return buffer;
+      } catch {
+        // ignore fallback errors
+      }
+
+      const buffer = await page.screenshot({ type: "png", fullPage: true });
+      await page.close();
+      await context.close();
       await browser.close();
       return buffer;
+    } catch (error) {
+      lastError = error;
+      console.warn("radar_capture_retry", {
+        attempt: attempt + 1,
+        error: error instanceof Error ? error.message : error,
+      });
+      await page.close();
+      await context.close();
     }
-  } catch {
-    // ignore fallback errors
   }
 
-  const buffer = await page.screenshot({ type: "png", fullPage: true });
   await browser.close();
-  return buffer;
+  throw new Error(
+    `Radar capture failed after ${retryDelaysMs.length} attempts: ${
+      lastError instanceof Error ? lastError.message : "Unknown error"
+    }`
+  );
 };
