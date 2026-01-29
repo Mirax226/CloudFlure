@@ -3,11 +3,22 @@ import { loadConfig } from "./config.js";
 import { prisma } from "./db/prisma.js";
 import { createBot, type BotState } from "./bot.js";
 import { runSchedulerTick } from "./scheduler/tick.js";
+import { logError, sendPingTest } from "./logger.js";
 
 const config = loadConfig();
 console.log("Config loaded", {
   publicBaseUrl: config.publicBaseUrl,
   maxSendsPerTick: config.maxSendsPerTick,
+});
+
+process.on("uncaughtException", async (error) => {
+  await logError(error, { scope: "uncaughtException" });
+  process.exit(1);
+});
+
+process.on("unhandledRejection", async (reason) => {
+  await logError(reason, { scope: "unhandledRejection" });
+  process.exit(1);
 });
 
 const app = express();
@@ -23,11 +34,15 @@ app.get("/health", (_req: Request, res: Response) => {
 const port = Number(process.env.PORT) || 3000;
 
 const start = async () => {
+  if (config.pathApplier.pingEnabled) {
+    await sendPingTest();
+  }
+
   try {
     await prisma.$connect();
     console.log("DB connected");
   } catch (error) {
-    console.error("DB connection failed", { error });
+    await logError(error, { scope: "db_connection" });
     process.exit(1);
   }
 
@@ -56,7 +71,7 @@ const start = async () => {
   });
 };
 
-start().catch((error) => {
-  console.error("startup_failed", { error });
+start().catch(async (error) => {
+  await logError(error, { scope: "startup" });
   process.exit(1);
 });
