@@ -3,7 +3,7 @@ import { loadConfig } from "./config.js";
 import { prisma } from "./db/prisma.js";
 import { createBot, type BotState } from "./bot.js";
 import { runSchedulerTick } from "./scheduler/tick.js";
-import { logError, logInfo, sendPingTest } from "./logger.js";
+import { logError, logInfo } from "./logger.js";
 
 const config = loadConfig();
 console.log("Config loaded", {
@@ -34,10 +34,6 @@ app.get("/health", (_req: Request, res: Response) => {
 const port = Number(process.env.PORT) || 3000;
 
 const start = async () => {
-  if (config.pathApplier.pingEnabled) {
-    await sendPingTest();
-  }
-
   try {
     await prisma.$connect();
     console.log("DB connected");
@@ -49,9 +45,11 @@ const start = async () => {
   await bot.init();
   console.log("Bot initialized");
 
-  app.post("/telegram/webhook", async (req: Request, res: Response) => {
-    await bot.handleUpdate(req.body);
+  app.post("/telegram/webhook", (req: Request, res: Response) => {
     res.send("ok");
+    void bot.handleUpdate(req.body).catch((error) => {
+      void logError("webhook_update_failed", { error });
+    });
   });
 
   const webhookUrl = `${config.publicBaseUrl}/telegram/webhook`;

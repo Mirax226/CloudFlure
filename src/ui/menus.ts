@@ -98,6 +98,7 @@ export const registerMenuHandlers = (
 ) => {
   bot.command("start", async (ctx: BotContext) => {
     await ensureUser(ctx, prisma);
+    console.log("telegram_start_received", { userId: ctx.from?.id });
     ctx.session.step = null;
     await ctx.reply("خوش اومدی! یکی از گزینه‌های زیر رو انتخاب کن:", {
       reply_markup: buildMainKeyboard(),
@@ -164,7 +165,7 @@ export const registerMenuHandlers = (
       return;
     }
     ctx.session.step = "awaitingInterval";
-    await ctx.reply("بازه ارسال رو بفرست (مثلاً 15 یا 2h یا 45m) ⏱", {
+    await ctx.reply("بازه ارسال رو بفرست (حداقل 5 دقیقه؛ مثلاً 15 یا 2h یا 45m) ⏱", {
       reply_markup: buildMainKeyboard(),
     });
   });
@@ -291,8 +292,8 @@ export const registerMenuHandlers = (
 
     if (ctx.session.step === "awaitingInterval") {
       const minutes = parseIntervalMinutes(text);
-      if (!minutes || minutes < 1 || minutes > 1440) {
-        await ctx.reply("عدد نامعتبره. بازه باید بین 1 تا 1440 دقیقه باشه.", {
+      if (!minutes || minutes < 5 || minutes > 1440) {
+        await ctx.reply("عدد نامعتبره. بازه باید بین 5 تا 1440 دقیقه باشه.", {
           reply_markup: buildMainKeyboard(),
         });
         return;
