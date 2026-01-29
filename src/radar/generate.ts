@@ -1,9 +1,23 @@
 import axios from "axios";
-import { fetchIranTimeseries, type RadarTimeseriesPoint } from "./fetch.js";
+import { type RadarTimeseriesPoint, validateRadarData } from "./fetch.js";
 
 const WIDTH = 1280;
 const HEIGHT = 720;
 const MAX_POINTS = 96;
+
+export type ChartErrorCode = "CHART_RENDER_FAILED" | "CHART_INVALID_DATA";
+
+export class ChartRenderError extends Error {
+  code: ChartErrorCode;
+
+  constructor(code: ChartErrorCode, message: string, cause?: unknown) {
+    super(message);
+    this.code = code;
+    if (cause instanceof Error && cause.stack) {
+      this.stack = cause.stack;
+    }
+  }
+}
 
 const formatTimestamp = (timezone: string): string => {
   const formatter = new Intl.DateTimeFormat("en-GB", {
@@ -37,12 +51,16 @@ const downsample = (points: RadarTimeseriesPoint[], maxPoints: number): RadarTim
 };
 
 export const generateRadarChartPng = async (
-  token: string,
+  points: RadarTimeseriesPoint[],
   timezone: string
 ): Promise<Buffer> => {
-  const points = downsample(await fetchIranTimeseries(token), MAX_POINTS);
-  const labels = points.map((point) => formatLabel(point.timestamp, timezone));
-  const data = points.map((point) => point.value);
+  if (!validateRadarData(points)) {
+    throw new ChartRenderError("CHART_INVALID_DATA", "Radar data validation failed");
+  }
+
+  const trimmedPoints = downsample(points, MAX_POINTS);
+  const labels = trimmedPoints.map((point) => formatLabel(point.timestamp, timezone));
+  const data = trimmedPoints.map((point) => point.value);
 
   const configuration = {
     type: "line",
@@ -89,17 +107,21 @@ export const generateRadarChartPng = async (
     },
   };
 
-  const response = await axios.post(
-    "https://quickchart.io/chart",
-    {
-      chart: configuration,
-      format: "png",
-      width: WIDTH,
-      height: HEIGHT,
-      backgroundColor: "white",
-    },
-    { responseType: "arraybuffer", timeout: 20_000 }
-  );
+  try {
+    const response = await axios.post(
+      "https://quickchart.io/chart",
+      {
+        chart: configuration,
+        format: "png",
+        width: WIDTH,
+        height: HEIGHT,
+        backgroundColor: "white",
+      },
+      { responseType: "arraybuffer", timeout: 20_000 }
+    );
 
-  return Buffer.from(response.data);
+    return Buffer.from(response.data);
+  } catch (error) {
+    throw new ChartRenderError("CHART_RENDER_FAILED", "Chart rendering failed", error);
+  }
 };

@@ -4,7 +4,7 @@ WORKDIR /app
 
 COPY package.json ./
 COPY package-lock.json* ./
-RUN npm install
+RUN if [ -f package-lock.json ]; then npm ci; else npm install; fi
 
 COPY prisma ./prisma
 RUN npx prisma generate
@@ -16,6 +16,6 @@ RUN npm run build
 
 ENV NODE_ENV=production
 
-EXPOSE 3000
+EXPOSE 10000
 
 CMD ["npm", "run", "start"]

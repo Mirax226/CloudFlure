@@ -2,7 +2,9 @@ import type { Bot, Context } from "grammy";
 import type { PrismaClient } from "@prisma/client";
 import { TargetChatType } from "@prisma/client";
 import { labels, buildMainKeyboard } from "./keyboards.js";
-import { setRadarApiToken } from "../db/settings.js";
+import { getRadarMode, setRadarApiToken, setRadarMode } from "../db/settings.js";
+import { logError } from "../logger.js";
+import type { RadarMode } from "../radar/fetch.js";
 
 export type SessionData = {
   step?:
@@ -10,6 +12,7 @@ export type SessionData = {
     | "awaitingTargetSelection"
     | "awaitingInterval"
     | "awaitingRadarToken"
+    | "awaitingRadarMode"
     | null;
 };
 
@@ -87,256 +90,365 @@ const resolveTargetType = (chatType: string): TargetChatType | null => {
   }
 };
 
+const parseRadarMode = (text: string): RadarMode | null => {
+  const normalized = text.toLowerCase();
+  if (normalized.includes("public") || normalized.includes("عمومی")) {
+    return "public";
+  }
+  if (normalized.includes("token") || normalized.includes("توکن")) {
+    return "token";
+  }
+  if (normalized.includes("auto") || normalized.includes("خودکار")) {
+    return "auto";
+  }
+  return null;
+};
+
+const radarModeLabel = (mode: RadarMode | null): string => {
+  switch (mode) {
+    case "public":
+      return "Public (بدون توکن)";
+    case "token":
+      return "Token";
+    case "auto":
+      return "Auto";
+    default:
+      return "پیش‌فرض (Auto)";
+  }
+};
+
 const showHelp = async (ctx: Context) => {
   await ctx.reply(
     [
       "برای افزودن مقصد، روی ➕ بزن و از کانال/گروه برام پیام فوروارد کن 📩",
       "برای تنظیم بازه ارسال باید اول مقصد رو انتخاب کنی 🎯",
       "بعد از انتخاب مقصد، بازه رو با عدد دقیقه یا فرمت 2h/45m ارسال کن ⏱",
-      "برای دریافت دیتا، اول توکن Radar API رو از منو تنظیم کن 🗝️",
+      "برای دریافت دیتا، توکن Radar API یا حالت Public/Auto رو تنظیم کن 🧭",
     ].join("\n"),
     { reply_markup: buildMainKeyboard() }
   );
+};
+
+const safeHandler = <T extends Context>(handler: (ctx: T) => Promise<void>) => {
+  return async (ctx: T) => {
+    try {
+      await handler(ctx);
+    } catch (error) {
+      await logError("menu_handler_failed", { error, updateId: ctx.update.update_id });
+      try {
+        await ctx.reply("خطای غیرمنتظره‌ای رخ داد. لطفاً دوباره تلاش کن.", {
+          reply_markup: buildMainKeyboard(),
+        });
+      } catch {
+        // Ignore reply errors
+      }
+    }
+  };
 };
 
 export const registerMenuHandlers = (
   bot: Bot<BotContext>,
   { prisma, sendNow }: MenuDeps
 ) => {
-  bot.command("start", async (ctx: BotContext) => {
-    await ensureUser(ctx, prisma);
-    console.log("telegram_start_received", { userId: ctx.from?.id });
-    ctx.session.step = null;
-    await ctx.reply("خوش اومدی! یکی از گزینه‌های زیر رو انتخاب کن:", {
-      reply_markup: buildMainKeyboard(),
-    });
-  });
-
-  bot.hears(labels.sendNow, async (ctx: BotContext) => {
-    await ensureUser(ctx, prisma);
-    ctx.session.step = null;
-    await sendNow(ctx);
-  });
-
-  bot.hears(labels.addTarget, async (ctx: BotContext) => {
-    await ensureUser(ctx, prisma);
-    ctx.session.step = "awaitingTargetForward";
-    await ctx.reply(
-      "بات رو به کانال/گروه اضافه کن و یک پیام از همونجا برام Forward کن 📩",
-      { reply_markup: buildMainKeyboard() }
-    );
-  });
-
-  bot.hears(labels.listTargets, async (ctx: BotContext) => {
-    const user = await ensureUser(ctx, prisma);
-    ctx.session.step = null;
-    if (!user) {
-      return;
-    }
-    const targets = await getUserTargets(user.id, prisma);
-    if (!targets.length) {
-      await ctx.reply("هنوز مقصدی اضافه نکردی. از دکمه ➕ استفاده کن.", {
-        reply_markup: buildMainKeyboard(),
-      });
-      return;
-    }
-    const lines = targets.map((target, index) => formatTargetLine(index + 1, target));
-    await ctx.reply(lines.join("\n"), { reply_markup: buildMainKeyboard() });
-  });
-
-  bot.hears(labels.selectTarget, async (ctx: BotContext) => {
-    const user = await ensureUser(ctx, prisma);
-    if (!user) {
-      return;
-    }
-    const targets = await getUserTargets(user.id, prisma);
-    if (!targets.length) {
-      await ctx.reply("اول یک مقصد اضافه کن. از دکمه ➕ استفاده کن.", {
-        reply_markup: buildMainKeyboard(),
-      });
-      return;
-    }
-    const lines = targets.map((target, index) => formatTargetLine(index + 1, target));
-    await ctx.reply([lines.join("\n"), "شماره مقصد را ارسال کن 🎯"].join("\n"), {
-      reply_markup: buildMainKeyboard(),
-    });
-    ctx.session.step = "awaitingTargetSelection";
-  });
-
-  bot.hears(labels.setInterval, async (ctx: BotContext) => {
-    const user = await ensureUser(ctx, prisma);
-    if (!user?.selectedTargetId) {
-      await ctx.reply("اول مقصد رو انتخاب کن 🎯", {
-        reply_markup: buildMainKeyboard(),
-      });
-      return;
-    }
-    ctx.session.step = "awaitingInterval";
-    await ctx.reply("بازه ارسال رو بفرست (حداقل 5 دقیقه؛ مثلاً 15 یا 2h یا 45m) ⏱", {
-      reply_markup: buildMainKeyboard(),
-    });
-  });
-
-  bot.hears(labels.toggleTarget, async (ctx: BotContext) => {
-    const user = await ensureUser(ctx, prisma);
-    ctx.session.step = null;
-    if (!user?.selectedTargetId) {
-      await ctx.reply("اول مقصد رو انتخاب کن 🎯", {
-        reply_markup: buildMainKeyboard(),
-      });
-      return;
-    }
-    const target = await prisma.targetChat.findUnique({
-      where: { id: user.selectedTargetId },
-    });
-    if (!target) {
-      await ctx.reply("مقصد پیدا نشد. دوباره انتخاب کن.", {
-        reply_markup: buildMainKeyboard(),
-      });
-      return;
-    }
-    const updated = await prisma.targetChat.update({
-      where: { id: target.id },
-      data: { isEnabled: !target.isEnabled },
-    });
-    await ctx.reply(
-      `وضعیت مقصد شد: ${updated.isEnabled ? "فعال ✅" : "غیرفعال ⛔"}`,
-      { reply_markup: buildMainKeyboard() }
-    );
-  });
-
-  bot.hears(labels.setRadarToken, async (ctx: BotContext) => {
-    await ensureUser(ctx, prisma);
-    ctx.session.step = "awaitingRadarToken";
-    await ctx.reply("توکن Radar API رو ارسال کن 🗝️", {
-      reply_markup: buildMainKeyboard(),
-    });
-  });
-
-  bot.hears(labels.help, async (ctx: BotContext) => {
-    await ensureUser(ctx, prisma);
-    ctx.session.step = null;
-    await showHelp(ctx);
-  });
-
-  bot.on("message", async (ctx: BotContext) => {
-    const user = await ensureUser(ctx, prisma);
-    if (!user) {
-      return;
-    }
-
-    const message = ctx.message;
-    const forwardChat =
-      message && "forward_from_chat" in message
-        ? (message.forward_from_chat as ForwardedChat | undefined)
-        : undefined;
-    if (ctx.session.step === "awaitingTargetForward") {
-      if (!forwardChat) {
-        await ctx.reply("پیام فوروارد شده از کانال/گروه رو بفرست 📩", {
-          reply_markup: buildMainKeyboard(),
-        });
-        return;
-      }
-      const targetType = resolveTargetType(forwardChat.type);
-      if (!targetType) {
-        await ctx.reply("نوع مقصد پشتیبانی نمی‌شه. دوباره تلاش کن.", {
-          reply_markup: buildMainKeyboard(),
-        });
-        return;
-      }
-      const target = await prisma.targetChat.upsert({
-        where: { chatId: BigInt(forwardChat.id) },
-        update: {
-          title: forwardChat.title ?? null,
-          type: targetType,
-        },
-        create: {
-          chatId: BigInt(forwardChat.id),
-          title: forwardChat.title ?? null,
-          type: targetType,
-          createdByUserId: user.id,
-        },
-      });
-      await prisma.targetSchedule.upsert({
-        where: { targetChatId: target.id },
-        update: {},
-        create: {
-          targetChatId: target.id,
-          intervalMinutes: 60,
-        },
-      });
+  bot.command(
+    "start",
+    safeHandler(async (ctx: BotContext) => {
+      await ensureUser(ctx, prisma);
+      console.log("telegram_start_received", { userId: ctx.from?.id });
       ctx.session.step = null;
+      await ctx.reply("خوش اومدی! یکی از گزینه‌های زیر رو انتخاب کن:", {
+        reply_markup: buildMainKeyboard(),
+      });
+    })
+  );
+
+  bot.hears(
+    labels.sendNow,
+    safeHandler(async (ctx: BotContext) => {
+      await ensureUser(ctx, prisma);
+      ctx.session.step = null;
+      await sendNow(ctx);
+    })
+  );
+
+  bot.hears(
+    labels.addTarget,
+    safeHandler(async (ctx: BotContext) => {
+      await ensureUser(ctx, prisma);
+      ctx.session.step = "awaitingTargetForward";
       await ctx.reply(
-        `✅ مقصد اضافه شد: ${target.title ?? "بدون عنوان"} — هر 60 دقیقه`,
+        "بات رو به کانال/گروه اضافه کن و یک پیام از همونجا برام Forward کن 📩",
         { reply_markup: buildMainKeyboard() }
       );
-      return;
-    }
+    })
+  );
 
-    const text = message?.text?.trim();
-    if (!text) {
-      return;
-    }
-
-    if (ctx.session.step === "awaitingTargetSelection") {
-      const index = Number(text);
-      if (Number.isNaN(index) || index < 1) {
-        await ctx.reply("شماره نامعتبره. یک عدد معتبر بفرست.", {
-          reply_markup: buildMainKeyboard(),
-        });
+  bot.hears(
+    labels.listTargets,
+    safeHandler(async (ctx: BotContext) => {
+      const user = await ensureUser(ctx, prisma);
+      ctx.session.step = null;
+      if (!user) {
         return;
       }
       const targets = await getUserTargets(user.id, prisma);
-      const target = targets[index - 1];
-      if (!target) {
-        await ctx.reply("شماره مقصد پیدا نشد. دوباره تلاش کن.", {
+      if (!targets.length) {
+        await ctx.reply("هنوز مقصدی اضافه نکردی. از دکمه ➕ استفاده کن.", {
           reply_markup: buildMainKeyboard(),
         });
         return;
       }
-      await prisma.user.update({
-        where: { id: user.id },
-        data: { selectedTargetId: target.id },
-      });
-      ctx.session.step = null;
-      await ctx.reply(`🎯 مقصد انتخاب شد: ${target.title ?? "بدون عنوان"}`, {
+      const lines = targets.map((target, index) => formatTargetLine(index + 1, target));
+      await ctx.reply(lines.join("\n"), { reply_markup: buildMainKeyboard() });
+    })
+  );
+
+  bot.hears(
+    labels.selectTarget,
+    safeHandler(async (ctx: BotContext) => {
+      const user = await ensureUser(ctx, prisma);
+      if (!user) {
+        return;
+      }
+      const targets = await getUserTargets(user.id, prisma);
+      if (!targets.length) {
+        await ctx.reply("اول یک مقصد اضافه کن. از دکمه ➕ استفاده کن.", {
+          reply_markup: buildMainKeyboard(),
+        });
+        return;
+      }
+      const lines = targets.map((target, index) => formatTargetLine(index + 1, target));
+      await ctx.reply([lines.join("\n"), "شماره مقصد را ارسال کن 🎯"].join("\n"), {
         reply_markup: buildMainKeyboard(),
       });
-      return;
-    }
+      ctx.session.step = "awaitingTargetSelection";
+    })
+  );
 
-    if (ctx.session.step === "awaitingInterval") {
-      const minutes = parseIntervalMinutes(text);
-      if (!minutes || minutes < 5 || minutes > 1440) {
-        await ctx.reply("عدد نامعتبره. بازه باید بین 5 تا 1440 دقیقه باشه.", {
-          reply_markup: buildMainKeyboard(),
-        });
-        return;
-      }
-      if (!user.selectedTargetId) {
+  bot.hears(
+    labels.setInterval,
+    safeHandler(async (ctx: BotContext) => {
+      const user = await ensureUser(ctx, prisma);
+      if (!user?.selectedTargetId) {
         await ctx.reply("اول مقصد رو انتخاب کن 🎯", {
           reply_markup: buildMainKeyboard(),
         });
         return;
       }
-      await prisma.targetSchedule.upsert({
-        where: { targetChatId: user.selectedTargetId },
-        update: { intervalMinutes: minutes },
-        create: { targetChatId: user.selectedTargetId, intervalMinutes: minutes },
-      });
-      ctx.session.step = null;
-      await ctx.reply(`بازه ارسال شد ${minutes} دقیقه ✅`, {
+      ctx.session.step = "awaitingInterval";
+      await ctx.reply("بازه ارسال رو بفرست (حداقل 3 دقیقه؛ مثلاً 15 یا 2h یا 45m) ⏱", {
         reply_markup: buildMainKeyboard(),
       });
-      return;
-    }
+    })
+  );
 
-    if (ctx.session.step === "awaitingRadarToken") {
-      await setRadarApiToken(prisma, text);
+  bot.hears(
+    labels.toggleTarget,
+    safeHandler(async (ctx: BotContext) => {
+      const user = await ensureUser(ctx, prisma);
       ctx.session.step = null;
-      await ctx.reply("توکن Radar API ذخیره شد ✅", {
+      if (!user?.selectedTargetId) {
+        await ctx.reply("اول مقصد رو انتخاب کن 🎯", {
+          reply_markup: buildMainKeyboard(),
+        });
+        return;
+      }
+      const target = await prisma.targetChat.findUnique({
+        where: { id: user.selectedTargetId },
+      });
+      if (!target) {
+        await ctx.reply("مقصد پیدا نشد. دوباره انتخاب کن.", {
+          reply_markup: buildMainKeyboard(),
+        });
+        return;
+      }
+      const updated = await prisma.targetChat.update({
+        where: { id: target.id },
+        data: { isEnabled: !target.isEnabled },
+      });
+      await ctx.reply(
+        `وضعیت مقصد شد: ${updated.isEnabled ? "فعال ✅" : "غیرفعال ⛔"}`,
+        { reply_markup: buildMainKeyboard() }
+      );
+    })
+  );
+
+  bot.hears(
+    labels.setRadarToken,
+    safeHandler(async (ctx: BotContext) => {
+      await ensureUser(ctx, prisma);
+      ctx.session.step = "awaitingRadarToken";
+      await ctx.reply("توکن Radar API رو ارسال کن 🗝️", {
         reply_markup: buildMainKeyboard(),
       });
-    }
-  });
+    })
+  );
+
+  bot.hears(
+    labels.setRadarSource,
+    safeHandler(async (ctx: BotContext) => {
+      await ensureUser(ctx, prisma);
+      const currentMode = await getRadarMode(prisma);
+      ctx.session.step = "awaitingRadarMode";
+      await ctx.reply(
+        [
+          `حالت فعلی: ${radarModeLabel(currentMode)}`,
+          "یکی از گزینه‌ها رو بفرست:",
+          "- Public (بدون توکن)",
+          "- Token",
+          "- Auto",
+        ].join("\n"),
+        { reply_markup: buildMainKeyboard() }
+      );
+    })
+  );
+
+  bot.hears(
+    labels.help,
+    safeHandler(async (ctx: BotContext) => {
+      await ensureUser(ctx, prisma);
+      ctx.session.step = null;
+      await showHelp(ctx);
+    })
+  );
+
+  bot.on(
+    "message",
+    safeHandler(async (ctx: BotContext) => {
+      const user = await ensureUser(ctx, prisma);
+      if (!user) {
+        return;
+      }
+
+      const message = ctx.message;
+      const forwardChat =
+        message && "forward_from_chat" in message
+          ? (message.forward_from_chat as ForwardedChat | undefined)
+          : undefined;
+      if (ctx.session.step === "awaitingTargetForward") {
+        if (!forwardChat) {
+          await ctx.reply("پیام فوروارد شده از کانال/گروه رو بفرست 📩", {
+            reply_markup: buildMainKeyboard(),
+          });
+          return;
+        }
+        const targetType = resolveTargetType(forwardChat.type);
+        if (!targetType) {
+          await ctx.reply("نوع مقصد پشتیبانی نمی‌شه. دوباره تلاش کن.", {
+            reply_markup: buildMainKeyboard(),
+          });
+          return;
+        }
+        const target = await prisma.targetChat.upsert({
+          where: { chatId: BigInt(forwardChat.id) },
+          update: {
+            title: forwardChat.title ?? null,
+            type: targetType,
+          },
+          create: {
+            chatId: BigInt(forwardChat.id),
+            title: forwardChat.title ?? null,
+            type: targetType,
+            createdByUserId: user.id,
+          },
+        });
+        await prisma.targetSchedule.upsert({
+          where: { targetChatId: target.id },
+          update: {},
+          create: {
+            targetChatId: target.id,
+            intervalMinutes: 60,
+          },
+        });
+        ctx.session.step = null;
+        await ctx.reply(
+          `✅ مقصد اضافه شد: ${target.title ?? "بدون عنوان"} — هر 60 دقیقه`,
+          { reply_markup: buildMainKeyboard() }
+        );
+        return;
+      }
+
+      const text = message?.text?.trim();
+      if (!text) {
+        return;
+      }
+
+      if (ctx.session.step === "awaitingTargetSelection") {
+        const index = Number(text);
+        if (Number.isNaN(index) || index < 1) {
+          await ctx.reply("شماره نامعتبره. یک عدد معتبر بفرست.", {
+            reply_markup: buildMainKeyboard(),
+          });
+          return;
+        }
+        const targets = await getUserTargets(user.id, prisma);
+        const target = targets[index - 1];
+        if (!target) {
+          await ctx.reply("شماره مقصد پیدا نشد. دوباره تلاش کن.", {
+            reply_markup: buildMainKeyboard(),
+          });
+          return;
+        }
+        await prisma.user.update({
+          where: { id: user.id },
+          data: { selectedTargetId: target.id },
+        });
+        ctx.session.step = null;
+        await ctx.reply(`🎯 مقصد انتخاب شد: ${target.title ?? "بدون عنوان"}`, {
+          reply_markup: buildMainKeyboard(),
+        });
+        return;
+      }
+
+      if (ctx.session.step === "awaitingInterval") {
+        const minutes = parseIntervalMinutes(text);
+        if (!minutes || minutes < 3 || minutes > 1440) {
+          await ctx.reply("عدد نامعتبره. بازه باید بین 3 تا 1440 دقیقه باشه.", {
+            reply_markup: buildMainKeyboard(),
+          });
+          return;
+        }
+        if (!user.selectedTargetId) {
+          await ctx.reply("اول مقصد رو انتخاب کن 🎯", {
+            reply_markup: buildMainKeyboard(),
+          });
+          return;
+        }
+        await prisma.targetSchedule.upsert({
+          where: { targetChatId: user.selectedTargetId },
+          update: { intervalMinutes: minutes },
+          create: { targetChatId: user.selectedTargetId, intervalMinutes: minutes },
+        });
+        ctx.session.step = null;
+        await ctx.reply(`بازه ارسال شد ${minutes} دقیقه ✅`, {
+          reply_markup: buildMainKeyboard(),
+        });
+        return;
+      }
+
+      if (ctx.session.step === "awaitingRadarToken") {
+        await setRadarApiToken(prisma, text);
+        ctx.session.step = null;
+        await ctx.reply("توکن Radar API ذخیره شد ✅", {
+          reply_markup: buildMainKeyboard(),
+        });
+        return;
+      }
+
+      if (ctx.session.step === "awaitingRadarMode") {
+        const mode = parseRadarMode(text);
+        if (!mode) {
+          await ctx.reply("مقدار نامعتبره. یکی از Public / Token / Auto رو بفرست.", {
+            reply_markup: buildMainKeyboard(),
+          });
+          return;
+        }
+        await setRadarMode(prisma, mode);
+        ctx.session.step = null;
+        await ctx.reply(`منبع دیتا شد: ${radarModeLabel(mode)} ✅`, {
+          reply_markup: buildMainKeyboard(),
+        });
+      }
+    })
+  );
 };
