@@ -66,8 +66,18 @@ export const createBot = (prisma: PrismaClient, config: EnvConfig, state: BotSta
       : null;
     const shouldSendToTarget = Boolean(selectedTarget?.isEnabled);
 
+    let buffer: Buffer;
+    try {
+      buffer = await captureRadarChart();
+    } catch (error) {
+      console.warn("send_now_capture_failed", {
+        tgUserId,
+        error: error instanceof Error ? error.message : error,
+      });
+      await ctx.reply("⏳ الان رادار دیر لود شد. لطفاً دوباره امتحان کن.");
+      return;
+    }
     state.lastSendByUserId.set(tgUserId, now);
-    const buffer = await captureRadarChart();
     const caption = `Cloudflare Radar 🇮🇷\n${formatTimestamp(config.defaultTimezone)}`;
     await sendChartToChat(privateChatId, caption, buffer);
     if (shouldSendToTarget && selectedTarget) {
