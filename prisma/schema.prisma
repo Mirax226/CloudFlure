@@ -16,6 +16,7 @@ model User {
   targetsCreated   TargetChat[] @relation("UserCreatedTargets")
   radarApiToken    String?
   radarMode        String?
+  radarDateRange   RadarDateRange @default(D7)
   createdAt        DateTime    @default(now())
   updatedAt        DateTime    @updatedAt
 }
@@ -24,6 +25,19 @@ enum TargetChatType {
   CHANNEL
   GROUP
   SUPERGROUP
+}
+
+enum RadarDateRange {
+  D1
+  D2
+  D3
+  D7
+  D14
+  D21
+  M1
+  M2
+  M3
+  Y1
 }
 
 model TargetChat {
@@ -77,6 +91,7 @@ model AppSetting {
   id             Int      @id @default(autoincrement())
   radarApiToken  String?
   radarMode      String?
+  radarDateRange RadarDateRange @default(D7)
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
 }

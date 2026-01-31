@@ -9,6 +9,7 @@ export const labels = {
   toggleTarget: "✅ فعال/غیرفعال مقصد",
   setRadarToken: "🗝️ تنظیم توکن Radar API",
   setRadarSource: "📡 منبع دیتا",
+  setRadarDateRange: "بازه زمانی چارت 📆",
   help: "🧩 راهنما",
 };
 
@@ -26,6 +27,8 @@ export const buildMainKeyboard = (): Keyboard => {
     .row()
     .text(labels.setRadarToken)
     .text(labels.setRadarSource)
+    .row()
+    .text(labels.setRadarDateRange)
     .row()
     .text(labels.help);
 

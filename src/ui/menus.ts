@@ -2,9 +2,11 @@ import type { Bot, Context } from "grammy";
 import type { PrismaClient } from "@prisma/client";
 import { TargetChatType } from "@prisma/client";
 import { labels, buildMainKeyboard } from "./keyboards.js";
-import { getRadarMode, setRadarApiToken, setRadarMode } from "../db/settings.js";
+import { getRadarDateRange, getRadarMode, setRadarApiToken, setRadarDateRange, setRadarMode } from "../db/settings.js";
 import { logError } from "../logger.js";
 import type { RadarMode } from "../radar/fetch.js";
+import type { RadarDateRangePreset } from "../radar/dateRange.js";
+import { isRadarTokenValidFormat } from "../radar/client.js";
 
 export type SessionData = {
   step?:
@@ -13,6 +15,7 @@ export type SessionData = {
     | "awaitingInterval"
     | "awaitingRadarToken"
     | "awaitingRadarMode"
+    | "awaitingRadarDateRange"
     | null;
 };
 
@@ -118,9 +121,28 @@ const radarModeLabel = (mode: RadarMode | null): string => {
   }
 };
 
-const validateRadarToken = (token: string): boolean => {
-  const trimmed = token.trim();
-  return /^[A-Za-z0-9_\-.]{20,}$/.test(trimmed);
+const RADAR_DATE_RANGE_OPTIONS: Array<{ preset: RadarDateRangePreset; label: string }> = [
+  { preset: "D1", label: "1 روزه" },
+  { preset: "D2", label: "2 روزه" },
+  { preset: "D3", label: "3 روزه" },
+  { preset: "D7", label: "1 هفته" },
+  { preset: "D14", label: "2 هفته" },
+  { preset: "D21", label: "3 هفته" },
+  { preset: "M1", label: "1 ماه" },
+  { preset: "M2", label: "2 ماه" },
+  { preset: "M3", label: "3 ماه" },
+  { preset: "Y1", label: "1 سال" },
+];
+
+const radarDateRangeLabel = (preset: RadarDateRangePreset | null): string => {
+  const option = RADAR_DATE_RANGE_OPTIONS.find((item) => item.preset === preset);
+  return option?.label ?? "1 هفته";
+};
+
+const parseRadarDateRange = (text: string): RadarDateRangePreset | null => {
+  const trimmed = text.trim();
+  const option = RADAR_DATE_RANGE_OPTIONS.find((item) => trimmed.includes(item.label));
+  return option?.preset ?? null;
 };
 
 const showHelp = async (ctx: Context) => {
@@ -140,7 +162,7 @@ const safeHandler = <T extends Context>(handler: (ctx: T) => Promise<void>) => {
     try {
       await handler(ctx);
     } catch (error) {
-      await logError("menu_handler_failed", { error, updateId: ctx.update.update_id });
+      await logError("menu_handler_failed", { updateId: ctx.update.update_id }, error);
       try {
         await ctx.reply("خطای غیرمنتظره‌ای رخ داد. لطفاً دوباره تلاش کن.", {
           reply_markup: buildMainKeyboard(),
@@ -308,6 +330,26 @@ export const registerMenuHandlers = (bot: Bot<BotContext>, { prisma, sendNow, ru
   );
 
   bot.hears(
+    labels.setRadarDateRange,
+    safeHandler(async (ctx: BotContext) => {
+      const user = await ensureUser(ctx, prisma);
+      if (!user) {
+        return;
+      }
+      const currentRange = await getRadarDateRange(prisma, user.id);
+      ctx.session.step = "awaitingRadarDateRange";
+      await ctx.reply(
+        [
+          `بازه فعلی: ${radarDateRangeLabel(currentRange)}`,
+          "یکی از گزینه‌ها رو بفرست:",
+          ...RADAR_DATE_RANGE_OPTIONS.map((option) => `- ${option.label}`),
+        ].join("\n"),
+        { reply_markup: buildMainKeyboard() }
+      );
+    })
+  );
+
+  bot.hears(
     labels.help,
     safeHandler(async (ctx: BotContext) => {
       await ensureUser(ctx, prisma);
@@ -432,7 +474,7 @@ export const registerMenuHandlers = (bot: Bot<BotContext>, { prisma, sendNow, ru
       }
 
       if (ctx.session.step === "awaitingRadarToken") {
-        if (!validateRadarToken(text)) {
+        if (!isRadarTokenValidFormat(text)) {
           await ctx.reply("فرمت توکن معتبر نیست. یک توکن صحیح ارسال کن.", {
             reply_markup: buildMainKeyboard(),
           });
@@ -458,6 +500,22 @@ export const registerMenuHandlers = (bot: Bot<BotContext>, { prisma, sendNow, ru
         await setRadarMode(prisma, mode, user.id);
         ctx.session.step = null;
         await ctx.reply(`منبع دیتا شد: ${radarModeLabel(mode)} ✅`, {
+          reply_markup: buildMainKeyboard(),
+        });
+        return;
+      }
+
+      if (ctx.session.step === "awaitingRadarDateRange") {
+        const preset = parseRadarDateRange(text);
+        if (!preset) {
+          await ctx.reply("مقدار نامعتبره. یکی از گزینه‌های بازه زمانی رو بفرست.", {
+            reply_markup: buildMainKeyboard(),
+          });
+          return;
+        }
+        await setRadarDateRange(prisma, preset, user.id);
+        ctx.session.step = null;
+        await ctx.reply(`بازه زمانی شد: ${radarDateRangeLabel(preset)} ✅`, {
           reply_markup: buildMainKeyboard(),
         });
       }

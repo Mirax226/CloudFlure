@@ -12,24 +12,32 @@ console.log("Config loaded", {
   radarMode: config.radar.mode,
 });
 void logInfo("radar_client_ready", {
-  publicBaseUrl: config.radar.publicBaseUrl,
-  tokenBaseUrl: config.radar.tokenBaseUrl,
+  baseUrl: "https://api.cloudflare.com/client/v4/radar",
 });
+if (!config.pm.enabled) {
+  void logWarn("pm_disabled", {
+    reason: !config.pm.baseUrl ? "PM_BASE_URL missing" : "PATH_APPLIER_TOKEN missing",
+  });
+}
 
 process.on("uncaughtException", async (error: unknown) => {
-  await logError("Unhandled error", error);
+  await logError("process_uncaughtException", { scope: "process_uncaughtException" }, error);
   process.exit(1);
 });
 
 process.on("unhandledRejection", async (reason: unknown) => {
-  await logError("Unhandled error", reason);
+  await logError("process_unhandledRejection", { scope: "process_unhandledRejection" }, reason);
   process.exit(1);
 });
 
 const app = express();
 app.use(express.json());
 
-const botState: BotState = { lastSendByUserId: new Map(), lastRadarSourceByUserId: new Map() };
+const botState: BotState = {
+  lastSendByUserId: new Map(),
+  lastRadarSourceByUserId: new Map(),
+  inFlightByUserId: new Map(),
+};
 const { bot, sendChartToChat } = createBot(prisma, config, botState);
 
 const version = process.env.npm_package_version ?? "unknown";
@@ -41,7 +49,7 @@ app.get("/health", async (_req: Request, res: Response) => {
     await prisma.$queryRaw`SELECT 1`;
   } catch (error) {
     dbStatus = "error";
-    await logError("health_db_check_failed", { error });
+    await logError("health_db_check_failed", {}, error);
   }
   res.json({ ok: dbStatus === "ok", time, version, db: dbStatus });
 });
@@ -53,7 +61,7 @@ const start = async () => {
     await prisma.$connect();
     console.log("DB connected");
   } catch (error) {
-    await logError("Database connection failed", { scope: "db_connection", error });
+    await logError("db_connection_failed", { scope: "db_connection" }, error);
     process.exit(1);
   }
 
@@ -67,7 +75,7 @@ const start = async () => {
         updateType: Object.keys(req.body ?? {})[0] ?? "unknown",
       });
       void bot.handleUpdate(req.body).catch((error) => {
-        void logError("webhook_update_failed", { error });
+        void logError("webhook_update_failed", {}, error);
       });
     });
 
@@ -75,7 +83,7 @@ const start = async () => {
     await bot.api.setWebhook(webhookUrl);
     console.log(`Webhook set to ${webhookUrl}`);
   } else {
-    await logWarn("PUBLIC_URL missing, falling back to long polling");
+    await logWarn("missing_env_PUBLIC_URL", { hint: "Set Render service URL for webhook or deep links" });
     void bot.start();
   }
 
@@ -91,10 +99,10 @@ const start = async () => {
     console.log(`server_listening:${port}`);
   });
 
-  await logInfo("Server started", { port });
+  await logInfo("server_started", { port });
 };
 
 start().catch(async (error) => {
-  await logError("Startup failed", { scope: "startup", error });
+  await logError("startup_failed", { scope: "startup" }, error);
   process.exit(1);
 });

@@ -3,27 +3,14 @@ import assert from "node:assert/strict";
 import axios from "axios";
 import { buildEndpointParams, DEFAULT_RADAR_ENDPOINT, RadarConfigError } from "../dist/radar/endpoints.js";
 import { fetchRadarData, RadarFetchError } from "../dist/radar/fetch.js";
-import { radarRequest } from "../dist/radar/client.js";
-
-const makeAxiosError = (status, message = "error") => {
-  const error = new Error(message);
-  error.isAxiosError = true;
-  error.response = {
-    status,
-    data: { success: false, errors: [{ message }] },
-    headers: {},
-  };
-  return error;
-};
+import { requestRadar } from "../dist/radar/client.js";
+import { rangePresetToApiParams } from "../dist/radar/dateRange.js";
 
 const buildConfig = () => ({
   mode: "auto",
-  token: "test-token",
-  publicBaseUrl: "https://api.cloudflare.com/client/v4/radar",
-  tokenBaseUrl: "https://api.cloudflare.com/client/v4/radar",
+  token: "test-token-123456789012345",
   timeoutMs: 1000,
-  retryMax: 0,
-  retryBaseDelayMs: 10,
+  dateRangePreset: "D7",
 });
 
 test("buildEndpointParams throws on empty dateRange", () => {
@@ -33,12 +20,15 @@ test("buildEndpointParams throws on empty dateRange", () => {
   );
 });
 
-test("auto mode falls back to token on 429", async () => {
+test("auto mode falls back to public on 400", async () => {
   const calls = [];
   const mocked = mock.method(axios, "get", async (_url, options) => {
     calls.push(options);
     if (calls.length === 1) {
-      throw makeAxiosError(429, "rate limited");
+      return {
+        status: 400,
+        data: { errors: [{ message: "bad request" }] },
+      };
     }
     return {
       status: 200,
@@ -49,46 +39,48 @@ test("auto mode falls back to token on 429", async () => {
     };
   });
 
-  const result = await fetchRadarData({ dateRange: "7d", limit: 5 }, buildConfig());
+  const result = await fetchRadarData({ limit: 5 }, buildConfig());
 
-  assert.equal(result.source, "token");
+  assert.equal(result.source, "public");
   assert.equal(calls.length, 2);
-  assert.equal(calls[1]?.headers?.Authorization, "Bearer test-token");
 
   mocked.mock.restore();
 });
 
-test("auto mode does not fall back on 400", async () => {
+test("auto mode does not fall back on 429", async () => {
   const mocked = mock.method(axios, "get", async () => {
-    throw makeAxiosError(400, "bad request");
+    return {
+      status: 429,
+      data: { errors: [{ message: "rate limited" }] },
+    };
   });
 
   await assert.rejects(
-    () => fetchRadarData({ dateRange: "7d", limit: 5 }, buildConfig()),
-    (error) => error instanceof RadarFetchError && error.code === "RADAR_BAD_REQUEST"
+    () => fetchRadarData({ limit: 5 }, buildConfig()),
+    (error) => error instanceof RadarFetchError && error.code === "RADAR_RATE_LIMIT"
   );
 
   mocked.mock.restore();
 });
 
-test("radarRequest returns ok false when success=false", async () => {
+test("requestRadar returns data for public mode", async () => {
   const mocked = mock.method(axios, "get", async () => ({
     status: 200,
-    data: { success: false, result: null, errors: [{ message: "denied" }] },
+    data: { success: true, result: [{ name: "IR", value: 10 }] },
   }));
 
-  const result = await radarRequest({
-    baseUrl: "https://api.cloudflare.com/client/v4/radar",
-    path: "/traffic/countries",
-    params: { dateRange: "7d", limit: 5 },
-    timeoutMs: 1000,
-    retryMax: 0,
-    retryBaseDelayMs: 10,
-  });
-
-  assert.equal(result.ok, false);
-  assert.equal(result.status, 200);
-  assert.equal(result.errors[0]?.message, "denied");
+  const result = await requestRadar("/traffic/countries", { dateRange: "7d", limit: 5 }, "public");
+  assert.equal(result.meta.status, 200);
+  assert.equal(result.meta.modeUsed, "public");
+  assert.ok(result.data.success);
 
   mocked.mock.restore();
+});
+
+test("rangePresetToApiParams returns fallback for month presets", () => {
+  const now = new Date("2024-04-01T00:00:00.000Z");
+  const result = rangePresetToApiParams("M1", now);
+  assert.ok(result.primary.since);
+  assert.ok(result.primary.until);
+  assert.equal(result.fallback.dateRange, "30d");
 });

@@ -1,145 +1,219 @@
 import axios from "axios";
-import { logError } from "../logger.js";
+import { logInfo, logWarn } from "../logger.js";
 
-export type RadarApiError = { code?: number | string; message?: string };
+export const CF_API_BASE = "https://api.cloudflare.com/client/v4";
+export const RADAR_BASE = `${CF_API_BASE}/radar`;
 
-export type RadarRequestResult = {
-  ok: boolean;
+export type RadarAuthMode = "public" | "token" | "auto";
+
+export type RadarRequestMeta = {
+  url: string;
   status: number;
-  result: unknown;
-  errors: RadarApiError[];
-  timingMs: number;
+  modeUsed: "public" | "token";
 };
 
-export type RadarRequestOptions = {
-  baseUrl: string;
+export class RadarHttpError extends Error {
+  status: number;
+  url: string;
   path: string;
-  params: Record<string, string | number | boolean>;
-  token?: string | null;
-  timeoutMs: number;
-  retryMax: number;
-  retryBaseDelayMs: number;
-};
+  params: Record<string, string | number | boolean | undefined>;
+  modeAttempted: "public" | "token";
+  responseBody: string;
 
-const ALLOWED_BASE_URL = "https://api.cloudflare.com/client/v4/radar";
-const USER_AGENT = "CloudFlureBot/1.0";
-
-const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-
-const getBackoffDelay = (baseDelayMs: number, attempt: number): number => {
-  return baseDelayMs * Math.pow(3, attempt);
-};
-
-const shouldRetry = (status: number, errorCode?: string): boolean => {
-  if (status === 429 || status >= 500) {
-    return true;
+  constructor(message: string, details: Omit<RadarHttpError, "name" | "message">) {
+    super(message);
+    this.name = "RadarHttpError";
+    this.status = details.status;
+    this.url = details.url;
+    this.path = details.path;
+    this.params = details.params;
+    this.modeAttempted = details.modeAttempted;
+    this.responseBody = details.responseBody;
   }
-  return errorCode === "ECONNABORTED" || status === 0;
-};
+}
 
-const normalizeBaseUrl = (baseUrl: string): string => {
-  const trimmed = baseUrl.endsWith("/") ? baseUrl.slice(0, -1) : baseUrl;
-  if (!trimmed.startsWith(ALLOWED_BASE_URL)) {
-    throw new Error(`Invalid Radar base URL: ${baseUrl}`);
-  }
-  return trimmed;
-};
+const USER_AGENT = "CloudFlureBot/2.0";
+const RESPONSE_BODY_LIMIT = 2000;
+const DEFAULT_TIMEOUT_MS = 15_000;
 
-export const radarRequest = async (options: RadarRequestOptions): Promise<RadarRequestResult> => {
-  const baseUrl = normalizeBaseUrl(options.baseUrl);
-  const url = new URL(options.path.replace(/^\//, ""), `${baseUrl}/`);
-  Object.entries(options.params).forEach(([key, value]) => {
+const truncate = (value: string, maxChars: number) => (value.length > maxChars ? `${value.slice(0, maxChars)}…` : value);
+
+export const buildUrl = (
+  path: string,
+  params: Record<string, string | number | boolean | undefined>
+): string => {
+  const url = new URL(path.replace(/^\//, ""), `${RADAR_BASE}/`);
+  Object.entries(params).forEach(([key, value]) => {
+    if (value === undefined) {
+      return;
+    }
     url.searchParams.set(key, String(value));
   });
+  return url.toString();
+};
 
+export const isRadarTokenValidFormat = (token?: string | null): boolean => {
+  if (!token) {
+    return false;
+  }
+  return /^[A-Za-z0-9_\-.]{20,}$/.test(token.trim());
+};
+
+const executeRequest = async <T>(
+  path: string,
+  params: Record<string, string | number | boolean | undefined>,
+  modeUsed: "public" | "token",
+  token: string | undefined,
+  timeoutMs: number
+): Promise<{ data: T; meta: RadarRequestMeta }> => {
+  const url = buildUrl(path, params);
   const headers: Record<string, string> = {
     Accept: "application/json",
     "User-Agent": USER_AGENT,
   };
-
-  if (options.token) {
-    headers.Authorization = `Bearer ${options.token}`;
+  if (modeUsed === "token" && token) {
+    headers.Authorization = `Bearer ${token}`;
   }
 
-  for (let attempt = 0; attempt <= options.retryMax; attempt += 1) {
-    const start = Date.now();
+  const response = await axios.get(url, {
+    timeout: timeoutMs,
+    headers,
+    validateStatus: () => true,
+  });
+  const status = response.status;
+  if (status < 200 || status >= 300) {
+    const responseBody =
+      typeof response.data === "string" ? response.data : JSON.stringify(response.data ?? "");
+    throw new RadarHttpError("Radar API responded with non-2xx status", {
+      status,
+      url,
+      path,
+      params,
+      modeAttempted: modeUsed,
+      responseBody: truncate(responseBody, RESPONSE_BODY_LIMIT),
+    });
+  }
+  return { data: response.data as T, meta: { url, status, modeUsed } };
+};
+
+const isFallbackStatus = (status: number): boolean => [400, 401, 403, 404].includes(status);
+
+export const requestRadar = async <T>(
+  path: string,
+  params: Record<string, string | number | boolean | undefined>,
+  mode: RadarAuthMode,
+  token?: string,
+  options?: { timeoutMs?: number }
+): Promise<{ data: T; meta: RadarRequestMeta }> => {
+  const timeoutMs = options?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  if (mode === "public") {
+    return executeRequest<T>(path, params, "public", undefined, timeoutMs);
+  }
+
+  if (mode === "token") {
+    return executeRequest<T>(path, params, "token", token, timeoutMs);
+  }
+
+  if (token) {
     try {
-      const response = await axios.get(url.toString(), {
-        timeout: options.timeoutMs,
-        headers,
-      });
-      const timingMs = Date.now() - start;
-      const payload = response.data as { success?: boolean; result?: unknown; errors?: RadarApiError[] } | undefined;
-      if (!payload || typeof payload.success !== "boolean") {
-        await logError("radar_response_invalid", { status: response.status, url: url.toString() });
-        return {
-          ok: false,
-          status: response.status,
-          result: null,
-          errors: [{ message: "Invalid JSON response" }],
-          timingMs,
-        };
-      }
-
-      return {
-        ok: payload.success,
-        status: response.status,
-        result: payload.result ?? null,
-        errors: payload.errors ?? [],
-        timingMs,
-      };
+      return await executeRequest<T>(path, params, "token", token, timeoutMs);
     } catch (error) {
-      const timingMs = Date.now() - start;
-      if (axios.isAxiosError(error)) {
-        const status = error.response?.status ?? 0;
-        const errors: RadarApiError[] = [
-          {
-            code: error.code,
-            message: error.response?.data?.errors?.[0]?.message ?? error.message,
-          },
-        ];
-
-        if (!shouldRetry(status, error.code) || attempt >= options.retryMax) {
-          return {
-            ok: false,
-            status,
-            result: null,
-            errors,
-            timingMs,
-          };
+      if (error instanceof RadarHttpError) {
+        if (isFallbackStatus(error.status)) {
+          await logWarn("radar_auto_token_fallback_public", {
+            status: error.status,
+            endpoint: path,
+            params,
+            modeUsed: "token",
+          });
+          return executeRequest<T>(path, params, "public", undefined, timeoutMs);
         }
-
-        let delayMs = getBackoffDelay(options.retryBaseDelayMs, attempt);
-        const retryAfter = error.response?.headers?.["retry-after"];
-        const retrySeconds = retryAfter ? Number(retryAfter) : Number.NaN;
-        if (!Number.isNaN(retrySeconds) && retrySeconds > 0) {
-          delayMs = retrySeconds * 1000;
-        }
-        await delay(delayMs);
-        continue;
       }
-
-      if (attempt >= options.retryMax) {
-        return {
-          ok: false,
-          status: 0,
-          result: null,
-          errors: [{ message: error instanceof Error ? error.message : "Unknown error" }],
-          timingMs,
-        };
-      }
-
-      await delay(getBackoffDelay(options.retryBaseDelayMs, attempt));
+      throw error;
     }
   }
 
+  return executeRequest<T>(path, params, "public", undefined, timeoutMs);
+};
+
+type PublicContract = {
+  path: string;
+  paramMode: "dateRange" | "sinceUntil";
+  extraParams?: Record<string, string>;
+};
+
+let cachedPublicContract: PublicContract | null = null;
+
+const deriveContractFromError = (responseBody: string): Partial<PublicContract> => {
+  const normalized = responseBody.toLowerCase();
+  if (normalized.includes("since") && normalized.includes("until")) {
+    return { paramMode: "sinceUntil" };
+  }
+  if (normalized.includes("daterange")) {
+    return { paramMode: "dateRange" };
+  }
+  return {};
+};
+
+const buildProbeDateRangeParams = () => ({ dateRange: "7d", limit: 10 });
+
+const buildProbeSinceUntilParams = () => {
+  const until = new Date();
+  const since = new Date(until.getTime() - 7 * 24 * 60 * 60 * 1000);
   return {
-    ok: false,
-    status: 0,
-    result: null,
-    errors: [{ message: "Radar request failed" }],
-    timingMs: 0,
+    since: since.toISOString(),
+    until: until.toISOString(),
+    limit: 10,
   };
 };
 
-export const getRadarBaseUrl = (): string => ALLOWED_BASE_URL;
+export const probeRadarPublicEndpoint = async (): Promise<PublicContract> => {
+  if (cachedPublicContract) {
+    return cachedPublicContract;
+  }
+
+  const basePath = "/traffic/countries";
+  const candidates: Array<{
+    path: string;
+    paramMode: "dateRange" | "sinceUntil";
+    extraParams?: Record<string, string>;
+    params: Record<string, string | number | boolean | undefined>;
+  }> = [
+    { path: basePath, paramMode: "dateRange", params: buildProbeDateRangeParams() },
+    { path: basePath, paramMode: "sinceUntil", params: buildProbeSinceUntilParams() },
+  ];
+
+  let lastErrorBody = "";
+  for (const candidate of candidates) {
+    const mergedParams = { ...candidate.params, ...(candidate.extraParams ?? {}) };
+    try {
+      await executeRequest(basePath, mergedParams, "public", undefined, DEFAULT_TIMEOUT_MS);
+      cachedPublicContract = {
+        path: candidate.path,
+        paramMode: candidate.paramMode,
+        extraParams: candidate.extraParams,
+      };
+      await logInfo("radar_public_contract_detected", cachedPublicContract);
+      return cachedPublicContract;
+    } catch (error) {
+      if (error instanceof RadarHttpError) {
+        lastErrorBody = error.responseBody;
+        const derived = deriveContractFromError(error.responseBody);
+        if (derived.paramMode && derived.paramMode !== candidate.paramMode) {
+          const params = derived.paramMode === "sinceUntil" ? buildProbeSinceUntilParams() : buildProbeDateRangeParams();
+          candidates.push({ path: basePath, paramMode: derived.paramMode, params });
+        }
+      }
+    }
+  }
+
+  cachedPublicContract = {
+    path: basePath,
+    paramMode: "dateRange",
+  };
+  await logWarn("radar_public_contract_fallback", {
+    endpoint: basePath,
+    responseBody: truncate(lastErrorBody, RESPONSE_BODY_LIMIT),
+  });
+  return cachedPublicContract;
+};
