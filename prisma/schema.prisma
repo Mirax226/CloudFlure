@@ -14,6 +14,8 @@ model User {
   selectedTargetId Int?
   selectedTarget   TargetChat? @relation("UserSelectedTarget", fields: [selectedTargetId], references: [id])
   targetsCreated   TargetChat[] @relation("UserCreatedTargets")
+  radarApiToken    String?
+  radarMode        String?
   createdAt        DateTime    @default(now())
   updatedAt        DateTime    @updatedAt
 }
@@ -50,6 +52,7 @@ model TargetSchedule {
   intervalMinutes Int        @default(60)
   lastSentAt      DateTime?
   nextRetryAt     DateTime?
+  failCount       Int        @default(0)
   retryCount      Int        @default(0)
   inProgressUntil DateTime?
   createdAt       DateTime   @default(now())

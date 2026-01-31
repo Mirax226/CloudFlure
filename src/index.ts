@@ -11,6 +11,10 @@ console.log("Config loaded", {
   maxSendsPerTick: config.maxSendsPerTick,
   radarMode: config.radar.mode,
 });
+void logInfo("radar_client_ready", {
+  publicBaseUrl: config.radar.publicBaseUrl,
+  tokenBaseUrl: config.radar.tokenBaseUrl,
+});
 
 process.on("uncaughtException", async (error: unknown) => {
   await logError("Unhandled error", error);
@@ -25,7 +29,7 @@ process.on("unhandledRejection", async (reason: unknown) => {
 const app = express();
 app.use(express.json());
 
-const botState: BotState = { lastSendByUserId: new Map() };
+const botState: BotState = { lastSendByUserId: new Map(), lastRadarSourceByUserId: new Map() };
 const { bot, sendChartToChat } = createBot(prisma, config, botState);
 
 const version = process.env.npm_package_version ?? "unknown";
@@ -81,7 +85,7 @@ const start = async () => {
   };
 
   setInterval(tick, 60 * 1000);
-  console.log("Scheduler started");
+  await logInfo("scheduler_started", { intervalSec: 60 });
 
   app.listen(port, () => {
     console.log(`server_listening:${port}`);

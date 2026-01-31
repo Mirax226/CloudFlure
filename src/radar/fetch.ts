@@ -1,17 +1,14 @@
-import axios from "axios";
 import { logError } from "../logger.js";
+import { radarRequest } from "./client.js";
+import {
+  buildEndpointParams,
+  DEFAULT_RADAR_ENDPOINT,
+  RadarConfigError,
+  type RadarEndpointDefinition,
+  type RadarEndpointParams,
+} from "./endpoints.js";
 
 export type RadarMode = "public" | "token" | "auto";
-
-export type RadarTimeseriesPoint = {
-  timestamp: string;
-  value: number;
-};
-
-export type RadarFetchParams = {
-  dateRange?: string;
-  location?: string;
-};
 
 export type RadarFetchConfig = {
   mode: RadarMode;
@@ -23,9 +20,13 @@ export type RadarFetchConfig = {
   retryBaseDelayMs: number;
 };
 
-export type RadarNormalizedData = {
-  points: RadarTimeseriesPoint[];
+export type RadarChartData = {
+  labels: string[];
+  values: number[];
   source: "public" | "token";
+  endpoint: string;
+  params: RadarEndpointParams;
+  label: string;
 };
 
 export type RadarErrorCode =
@@ -35,319 +36,383 @@ export type RadarErrorCode =
   | "RADAR_UPSTREAM"
   | "RADAR_TIMEOUT"
   | "RADAR_NETWORK"
-  | "RADAR_INVALID_DATA";
+  | "RADAR_INVALID_DATA"
+  | "RADAR_EMPTY_DATA"
+  | "RADAR_PUBLIC_UNSUPPORTED"
+  | "RADAR_TOKEN_MISSING";
 
 export class RadarFetchError extends Error {
   code: RadarErrorCode;
   status?: number;
-  responseBody?: string;
-  url?: string;
-  params?: RadarFetchParams;
+  errors?: { code?: number | string; message?: string }[];
+  endpoint?: string;
+  params?: RadarEndpointParams;
+  timingMs?: number;
 
   constructor(
     code: RadarErrorCode,
     message: string,
     meta?: {
       status?: number;
-      responseBody?: string;
-      url?: string;
-      params?: RadarFetchParams;
+      errors?: { code?: number | string; message?: string }[];
+      endpoint?: string;
+      params?: RadarEndpointParams;
+      timingMs?: number;
     }
   ) {
     super(message);
     this.code = code;
     this.status = meta?.status;
-    this.responseBody = meta?.responseBody;
-    this.url = meta?.url;
+    this.errors = meta?.errors;
+    this.endpoint = meta?.endpoint;
     this.params = meta?.params;
+    this.timingMs = meta?.timingMs;
   }
 }
 
-const normalizeTimestamp = (value: unknown): string | null => {
-  if (!value) {
-    return null;
+export const validateRadarData = (labels: string[], values: number[]): boolean => {
+  if (!Array.isArray(labels) || !Array.isArray(values) || labels.length === 0 || labels.length !== values.length) {
+    return false;
   }
-  const date = new Date(String(value));
-  if (Number.isNaN(date.getTime())) {
-    return null;
-  }
-  return date.toISOString();
+  return values.every((value) => Number.isFinite(value));
 };
 
-const normalizePoint = (point: Record<string, unknown>): RadarTimeseriesPoint | null => {
-  const timestamp = normalizeTimestamp(point.timestamp ?? point.ts ?? point.time);
-  const rawValue = point.value ?? point.requests ?? point.traffic ?? point.count ?? point.ratio;
-  if (!timestamp || rawValue === null || rawValue === undefined) {
+const normalizeItemValue = (value: unknown): number | null => {
+  const numeric = Number(value);
+  if (Number.isNaN(numeric)) {
     return null;
   }
-  const value = Number(rawValue);
-  if (Number.isNaN(value)) {
-    return null;
-  }
-  return { timestamp, value };
+  return numeric;
 };
 
-export const parseRadarResponse = (payload: unknown): RadarTimeseriesPoint[] => {
-  const result = (payload as { result?: unknown })?.result ?? payload;
-  if (!result || typeof result !== "object") {
+const pickLabel = (record: Record<string, unknown>, fallback: string): string => {
+  const labelValue =
+    record.name ?? record.label ?? record.country ?? record.location ?? record.id ?? record.code ?? record.region ?? fallback;
+  return String(labelValue);
+};
+
+const normalizeRecords = (items: Array<Record<string, unknown>>, limit: number): { labels: string[]; values: number[] } => {
+  const labels: string[] = [];
+  const values: number[] = [];
+  for (const item of items) {
+    const value =
+      normalizeItemValue(item.value ?? item.count ?? item.requests ?? item.traffic ?? item.ratio ?? item.total ?? item.share);
+    if (value === null) {
+      continue;
+    }
+    labels.push(pickLabel(item, `Item ${labels.length + 1}`));
+    values.push(value);
+    if (labels.length >= limit) {
+      break;
+    }
+  }
+  return { labels, values };
+};
+
+const extractRecords = (result: unknown): Array<Record<string, unknown>> => {
+  if (!result) {
+    return [];
+  }
+
+  if (Array.isArray(result)) {
+    return result.filter((item) => typeof item === "object" && item !== null) as Array<Record<string, unknown>>;
+  }
+
+  if (typeof result !== "object") {
     return [];
   }
 
   const record = result as Record<string, unknown>;
-  const directSeries = record.timeseries ?? record.timeSeries ?? record.series;
-  if (Array.isArray(directSeries)) {
-    return directSeries
-      .map((item) => (typeof item === "object" && item ? normalizePoint(item as Record<string, unknown>) : null))
-      .filter((item): item is RadarTimeseriesPoint => Boolean(item));
+  const top = record.top;
+  if (Array.isArray(top)) {
+    return top.filter((item) => typeof item === "object" && item !== null) as Array<Record<string, unknown>>;
   }
 
-  const timeseries = record.timeseries as Record<string, unknown> | undefined;
-  if (timeseries) {
-    const timestamps = timeseries.timestamps as unknown[] | undefined;
-    const values = timeseries.values as unknown[] | undefined;
-    if (Array.isArray(timestamps) && Array.isArray(values)) {
-      const points: RadarTimeseriesPoint[] = [];
-      const count = Math.min(timestamps.length, values.length);
-      for (let index = 0; index < count; index += 1) {
-        const timestamp = normalizeTimestamp(timestamps[index]);
-        const value = Number(values[index]);
-        if (timestamp && !Number.isNaN(value)) {
-          points.push({ timestamp, value });
-        }
-      }
-      return points;
-    }
+  const data = record.data;
+  if (Array.isArray(data)) {
+    return data.filter((item) => typeof item === "object" && item !== null) as Array<Record<string, unknown>>;
   }
 
-  const series = record.series as Array<Record<string, unknown>> | undefined;
-  if (Array.isArray(series) && series.length > 0) {
-    const first = series[0];
-    const timestamps = first.timestamps as unknown[] | undefined;
-    const values = first.values as unknown[] | undefined;
-    if (Array.isArray(timestamps) && Array.isArray(values)) {
-      const points: RadarTimeseriesPoint[] = [];
-      const count = Math.min(timestamps.length, values.length);
-      for (let index = 0; index < count; index += 1) {
-        const timestamp = normalizeTimestamp(timestamps[index]);
-        const value = Number(values[index]);
-        if (timestamp && !Number.isNaN(value)) {
-          points.push({ timestamp, value });
-        }
-      }
-      return points;
-    }
+  const series = record.series;
+  if (Array.isArray(series)) {
+    return series.filter((item) => typeof item === "object" && item !== null) as Array<Record<string, unknown>>;
+  }
+
+  const topKeys = Object.keys(record).filter((key) => key.startsWith("top_"));
+  if (topKeys.length > 0) {
+    return topKeys
+      .sort((a, b) => a.localeCompare(b))
+      .map((key) => record[key])
+      .filter((item) => typeof item === "object" && item !== null) as Array<Record<string, unknown>>;
   }
 
   return [];
 };
 
-export const validateRadarData = (points: RadarTimeseriesPoint[]): boolean => {
-  if (!Array.isArray(points) || points.length === 0) {
-    return false;
-  }
-  return points.every((point) =>
-    Boolean(point && typeof point.timestamp === "string" && typeof point.value === "number" && !Number.isNaN(point.value))
-  );
+const buildRadarChartData = (
+  result: unknown,
+  limit: number
+): { labels: string[]; values: number[] } => {
+  const records = extractRecords(result);
+  return normalizeRecords(records, limit);
 };
 
-const truncate = (value: unknown, max = 1000): string => {
-  const text = typeof value === "string" ? value : JSON.stringify(value ?? "");
-  if (text.length <= max) {
-    return text;
-  }
-  return `${text.slice(0, max)}…`;
-};
-
-const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-
-const getBackoffDelay = (baseDelayMs: number, attempt: number): number => {
-  return baseDelayMs * Math.pow(2, attempt);
-};
-
-const normalizeParams = (params: RadarFetchParams): Required<RadarFetchParams> => {
-  return {
-    dateRange: params.dateRange ?? "1d",
-    location: params.location ?? "IR",
-  };
-};
-
-export const buildRadarUrl = (params: RadarFetchParams, baseUrl: string): string => {
-  const normalizedBase = baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`;
-  const url = new URL("http/timeseries", normalizedBase);
-  const normalizedParams = normalizeParams(params);
-  url.searchParams.set("dateRange", normalizedParams.dateRange);
-  url.searchParams.set("location", normalizedParams.location);
-  return url.toString();
-};
-
-const mapAxiosError = async (
-  error: unknown,
-  meta: { url: string; params: RadarFetchParams }
-): Promise<RadarFetchError> => {
-  if (axios.isAxiosError(error)) {
-    const status = error.response?.status;
-    const responseBody = error.response ? truncate(error.response.data) : undefined;
-    const code = error.code;
-
-    if (status) {
-      const mappedCode: RadarErrorCode =
-        status === 400
-          ? "RADAR_BAD_REQUEST"
-          : status === 401 || status === 403
-            ? "RADAR_UNAUTHORIZED"
-            : status === 429
-              ? "RADAR_RATE_LIMIT"
-              : status >= 500
-                ? "RADAR_UPSTREAM"
-                : "RADAR_NETWORK";
-
-      await logError("radar_fetch_failed", {
-        status,
-        responseBody,
-        url: meta.url,
-        params: meta.params,
-      });
-
-      return new RadarFetchError(mappedCode, `Radar API responded with status ${status}`, {
-        status,
-        responseBody,
-        url: meta.url,
-        params: meta.params,
-      });
-    }
-
-    if (code === "ECONNABORTED") {
-      await logError("radar_fetch_timeout", { url: meta.url, params: meta.params });
-      return new RadarFetchError("RADAR_TIMEOUT", "Radar API request timed out", {
-        url: meta.url,
-        params: meta.params,
-      });
-    }
-
-    await logError("radar_fetch_network_error", {
-      url: meta.url,
-      params: meta.params,
-      message: error.message,
-    });
-
-    return new RadarFetchError("RADAR_NETWORK", "Radar API network error", {
-      url: meta.url,
-      params: meta.params,
-    });
-  }
-
-  return new RadarFetchError("RADAR_NETWORK", "Radar API request failed", {
-    url: meta.url,
-    params: meta.params,
+const mapRadarError = (
+  status: number,
+  timingMs: number,
+  endpoint: RadarEndpointDefinition,
+  params: RadarEndpointParams,
+  errors: { code?: number | string; message?: string }[]
+): RadarFetchError => {
+  const code: RadarErrorCode =
+    status === 400
+      ? "RADAR_BAD_REQUEST"
+      : status === 401 || status === 403
+        ? "RADAR_UNAUTHORIZED"
+        : status === 429
+          ? "RADAR_RATE_LIMIT"
+          : status >= 500
+            ? "RADAR_UPSTREAM"
+            : status === 0
+              ? "RADAR_NETWORK"
+              : "RADAR_NETWORK";
+  return new RadarFetchError(code, `Radar API responded with status ${status}`, {
+    status,
+    errors,
+    endpoint: endpoint.path,
+    params,
+    timingMs,
   });
 };
 
-const shouldRetry = (code: RadarErrorCode): boolean => {
-  return code === "RADAR_RATE_LIMIT" || code === "RADAR_UPSTREAM" || code === "RADAR_TIMEOUT" || code === "RADAR_NETWORK";
+const fetchFromSource = async (
+  params: RadarEndpointParams,
+  config: RadarFetchConfig,
+  endpoint: RadarEndpointDefinition,
+  source: "public" | "token"
+): Promise<RadarChartData> => {
+  if (source === "token" && !config.token) {
+    throw new RadarFetchError("RADAR_TOKEN_MISSING", "Radar API token is missing", {
+      endpoint: endpoint.path,
+      params,
+    });
+  }
+
+  const normalizedParams = buildEndpointParams(params, endpoint);
+  const baseUrl = source === "public" ? config.publicBaseUrl : config.tokenBaseUrl;
+
+  const response = await radarRequest({
+    baseUrl,
+    path: endpoint.path,
+    params: normalizedParams,
+    token: source === "token" ? config.token : null,
+    timeoutMs: config.timeoutMs,
+    retryMax: config.retryMax,
+    retryBaseDelayMs: config.retryBaseDelayMs,
+  });
+
+  if (!response.ok) {
+    await logError("radar_fetch_failed", {
+      status: response.status,
+      errors: response.errors,
+      endpoint: endpoint.path,
+      params: normalizedParams,
+      source,
+    });
+    throw mapRadarError(response.status, response.timingMs, endpoint, normalizedParams, response.errors);
+  }
+
+  const { labels, values } = buildRadarChartData(response.result, normalizedParams.limit ?? endpoint.defaults.limit);
+  if (!validateRadarData(labels, values)) {
+    throw new RadarFetchError("RADAR_EMPTY_DATA", "Radar API returned empty data", {
+      status: response.status,
+      errors: response.errors,
+      endpoint: endpoint.path,
+      params: normalizedParams,
+      timingMs: response.timingMs,
+    });
+  }
+
+  return {
+    labels,
+    values,
+    source,
+    endpoint: endpoint.path,
+    params: normalizedParams,
+    label: endpoint.label,
+  };
 };
 
-const fetchFromMode = async (
-  params: RadarFetchParams,
-  config: RadarFetchConfig,
-  mode: "public" | "token"
-): Promise<RadarTimeseriesPoint[]> => {
-  const url = buildRadarUrl(params, mode === "public" ? config.publicBaseUrl : config.tokenBaseUrl);
-  const headers: Record<string, string> = {
-    "User-Agent": "CloudFlureBot/1.0",
-  };
-  if (mode === "token") {
-    if (!config.token) {
-      throw new RadarFetchError("RADAR_UNAUTHORIZED", "Radar API token is missing", {
-        url,
-        params,
-      });
-    }
-    headers.Authorization = `Bearer ${config.token}`;
-  }
-
-  const normalizedParams = normalizeParams(params);
-
-  for (let attempt = 0; attempt <= config.retryMax; attempt += 1) {
-    try {
-      const response = await axios.get(url, {
-        timeout: config.timeoutMs,
-        headers,
-      });
-      const points = parseRadarResponse(response.data);
-      if (!validateRadarData(points)) {
-        throw new RadarFetchError("RADAR_INVALID_DATA", "Radar API returned invalid data", {
-          url,
-          params: normalizedParams,
-        });
-      }
-      return points;
-    } catch (error) {
-      const radarError = error instanceof RadarFetchError ? error : await mapAxiosError(error, { url, params: normalizedParams });
-      if (!shouldRetry(radarError.code) || attempt >= config.retryMax) {
-        throw radarError;
-      }
-      let delayMs = getBackoffDelay(config.retryBaseDelayMs, attempt);
-      if (radarError.code === "RADAR_RATE_LIMIT" && axios.isAxiosError(error)) {
-        const retryAfter = error.response?.headers?.["retry-after"];
-        const retrySeconds = retryAfter ? Number(retryAfter) : Number.NaN;
-        if (!Number.isNaN(retrySeconds) && retrySeconds > 0) {
-          delayMs = retrySeconds * 1000;
-        }
-      }
-      await delay(delayMs);
-    }
-  }
-
-  throw new RadarFetchError("RADAR_NETWORK", "Radar API request failed", { url, params: normalizedParams });
+const shouldFallbackToToken = (error: RadarFetchError): boolean => {
+  return (
+    error.code === "RADAR_UNAUTHORIZED" ||
+    error.code === "RADAR_RATE_LIMIT" ||
+    error.code === "RADAR_UPSTREAM" ||
+    error.code === "RADAR_TIMEOUT" ||
+    error.code === "RADAR_NETWORK"
+  );
 };
 
 export const fetchRadarData = async (
-  params: RadarFetchParams,
-  config: RadarFetchConfig
-): Promise<RadarNormalizedData> => {
-  const mode = config.mode;
-  if (mode === "public") {
-    const points = await fetchFromMode(params, config, "public");
-    return { points, source: "public" };
+  params: RadarEndpointParams,
+  config: RadarFetchConfig,
+  endpoint: RadarEndpointDefinition = DEFAULT_RADAR_ENDPOINT
+): Promise<RadarChartData> => {
+  if (config.mode === "public") {
+    if (!endpoint.supportsPublic) {
+      throw new RadarFetchError("RADAR_PUBLIC_UNSUPPORTED", "Public not available for this chart", {
+        endpoint: endpoint.path,
+        params,
+      });
+    }
+    return fetchFromSource(params, config, endpoint, "public");
   }
-  if (mode === "token") {
-    const points = await fetchFromMode(params, config, "token");
-    return { points, source: "token" };
+
+  if (config.mode === "token") {
+    return fetchFromSource(params, config, endpoint, "token");
+  }
+
+  if (!endpoint.supportsPublic) {
+    return fetchFromSource(params, config, endpoint, "token");
   }
 
   try {
-    const points = await fetchFromMode(params, config, "public");
-    return { points, source: "public" };
+    return await fetchFromSource(params, config, endpoint, "public");
   } catch (error) {
+    if (error instanceof RadarConfigError) {
+      throw error;
+    }
     const radarError = error as RadarFetchError;
-    const canFallback =
-      radarError instanceof RadarFetchError &&
-      radarError.code !== "RADAR_BAD_REQUEST" &&
-      radarError.code !== "RADAR_INVALID_DATA";
-    if (canFallback && config.token) {
-      const points = await fetchFromMode(params, config, "token");
-      return { points, source: "token" };
+    if (radarError instanceof RadarFetchError && shouldFallbackToToken(radarError)) {
+      return await fetchFromSource(params, config, endpoint, "token");
     }
     throw radarError;
   }
 };
 
-export const testPublicRadarEndpoint = async (config: RadarFetchConfig): Promise<{ ok: boolean; error?: string }> => {
-  try {
-    await fetchFromMode({ dateRange: "1d", location: "IR" }, config, "public");
-    return { ok: true };
-  } catch (error) {
-    const radarError = error as RadarFetchError;
-    return { ok: false, error: radarError.message };
-  }
+export type RadarDiagnostics = {
+  configuredMode: RadarMode;
+  effectiveSource: "public" | "token" | null;
+  endpoint: string;
+  params: RadarEndpointParams;
+  status: number | null;
+  timingMs: number | null;
+  errorSummary: string | null;
 };
 
-export const testTokenRadarEndpoint = async (config: RadarFetchConfig): Promise<{ ok: boolean; error?: string }> => {
-  try {
-    await fetchFromMode({ dateRange: "1d", location: "IR" }, config, "token");
-    return { ok: true };
-  } catch (error) {
-    const radarError = error as RadarFetchError;
-    return { ok: false, error: radarError.message };
+const summarizeErrors = (errors?: { code?: number | string; message?: string }[]): string | null => {
+  if (!errors || errors.length === 0) {
+    return null;
   }
+  const first = errors[0];
+  if (first.code && first.message) {
+    return `${first.code}: ${first.message}`;
+  }
+  return first.message ?? String(first.code ?? "Unknown error");
+};
+
+export const diagnoseRadar = async (
+  params: RadarEndpointParams,
+  config: RadarFetchConfig,
+  endpoint: RadarEndpointDefinition = DEFAULT_RADAR_ENDPOINT
+): Promise<RadarDiagnostics> => {
+  const normalizedParams = buildEndpointParams(params, endpoint);
+  const buildResult = (
+    source: "public" | "token",
+    status: number,
+    timingMs: number,
+    errors?: { code?: number | string; message?: string }[]
+  ): RadarDiagnostics => ({
+    configuredMode: config.mode,
+    effectiveSource: source,
+    endpoint: endpoint.path,
+    params: normalizedParams,
+    status,
+    timingMs,
+    errorSummary: summarizeErrors(errors),
+  });
+
+  if (config.mode === "public") {
+    if (!endpoint.supportsPublic) {
+      return {
+        configuredMode: config.mode,
+        effectiveSource: null,
+        endpoint: endpoint.path,
+        params: normalizedParams,
+        status: null,
+        timingMs: null,
+        errorSummary: "Public not available for this chart",
+      };
+    }
+    const response = await radarRequest({
+      baseUrl: config.publicBaseUrl,
+      path: endpoint.path,
+      params: normalizedParams,
+      timeoutMs: config.timeoutMs,
+      retryMax: config.retryMax,
+      retryBaseDelayMs: config.retryBaseDelayMs,
+    });
+    return buildResult("public", response.status, response.timingMs, response.errors);
+  }
+
+  if (config.mode === "token") {
+    const response = await radarRequest({
+      baseUrl: config.tokenBaseUrl,
+      path: endpoint.path,
+      params: normalizedParams,
+      token: config.token,
+      timeoutMs: config.timeoutMs,
+      retryMax: config.retryMax,
+      retryBaseDelayMs: config.retryBaseDelayMs,
+    });
+    return buildResult("token", response.status, response.timingMs, response.errors);
+  }
+
+  if (!endpoint.supportsPublic) {
+    const response = await radarRequest({
+      baseUrl: config.tokenBaseUrl,
+      path: endpoint.path,
+      params: normalizedParams,
+      token: config.token,
+      timeoutMs: config.timeoutMs,
+      retryMax: config.retryMax,
+      retryBaseDelayMs: config.retryBaseDelayMs,
+    });
+    return buildResult("token", response.status, response.timingMs, response.errors);
+  }
+
+  const publicResponse = await radarRequest({
+    baseUrl: config.publicBaseUrl,
+    path: endpoint.path,
+    params: normalizedParams,
+    timeoutMs: config.timeoutMs,
+    retryMax: config.retryMax,
+    retryBaseDelayMs: config.retryBaseDelayMs,
+  });
+  if (publicResponse.ok) {
+    return buildResult("public", publicResponse.status, publicResponse.timingMs, publicResponse.errors);
+  }
+
+  const publicError = mapRadarError(
+    publicResponse.status,
+    publicResponse.timingMs,
+    endpoint,
+    normalizedParams,
+    publicResponse.errors
+  );
+
+  if (shouldFallbackToToken(publicError)) {
+    const tokenResponse = await radarRequest({
+      baseUrl: config.tokenBaseUrl,
+      path: endpoint.path,
+      params: normalizedParams,
+      token: config.token,
+      timeoutMs: config.timeoutMs,
+      retryMax: config.retryMax,
+      retryBaseDelayMs: config.retryBaseDelayMs,
+    });
+    return buildResult("token", tokenResponse.status, tokenResponse.timingMs, tokenResponse.errors);
+  }
+
+  return buildResult("public", publicResponse.status, publicResponse.timingMs, publicResponse.errors);
 };
