@@ -1,6 +1,11 @@
+import { reportToPM, getPmDisabledReason, type PMLevel } from "./pmReporter.js";
+
 type LogLevel = "info" | "warn" | "error";
 
 type LogMeta = Record<string, unknown>;
+
+const DROP_META_KEYS = new Set(["config", "request", "response", "raw", "rawConfig"]);
+const REDACT_KEY_PATTERN = /(token|authorization|api[_-]?token|path[_-]?applier|secret|password)/i;
 
 const formatErrorDetails = (error: unknown): LogMeta => {
   if (error instanceof Error) {
@@ -12,6 +17,44 @@ const formatErrorDetails = (error: unknown): LogMeta => {
   }
 
   return { message: String(error) };
+};
+
+const redactValue = (value: unknown, depth = 0): unknown => {
+  if (value == null) {
+    return value;
+  }
+  if (typeof value === "string") {
+    if (value.startsWith("Bearer ")) {
+      return "[redacted]";
+    }
+    return value;
+  }
+  if (value instanceof Error) {
+    return formatErrorDetails(value);
+  }
+  if (Array.isArray(value)) {
+    if (depth > 2) {
+      return value.slice(0, 5);
+    }
+    return value.map((item) => redactValue(item, depth + 1));
+  }
+  if (typeof value === "object") {
+    if (depth > 2) {
+      return "[truncated]";
+    }
+    const record = value as Record<string, unknown>;
+    const entries = Object.entries(record).flatMap(([key, entry]) => {
+      if (DROP_META_KEYS.has(key)) {
+        return [];
+      }
+      if (REDACT_KEY_PATTERN.test(key)) {
+        return [[key, "[redacted]"]];
+      }
+      return [[key, redactValue(entry, depth + 1)]];
+    });
+    return Object.fromEntries(entries);
+  }
+  return value;
 };
 
 const stringifyMetaValue = (value: unknown): string => {
@@ -55,19 +98,45 @@ const normalizeMeta = (meta?: unknown): LogMeta => {
   return { meta };
 };
 
-export const logInfo = async (message: string, meta?: LogMeta): Promise<void> => {
-  const payloadMeta = normalizeMeta(meta);
-  console.log(formatLogOutput("info", message, payloadMeta));
+const enrichMeta = (meta: LogMeta): LogMeta => {
+  const pmDisabledReason = getPmDisabledReason();
+  const baseMeta: LogMeta = {
+    renderService: process.env.RENDER_SERVICE_NAME ?? null,
+    commitSha: process.env.RENDER_GIT_COMMIT ?? process.env.GIT_COMMIT ?? null,
+    pmDisabledReason,
+  };
+  return redactValue({ ...baseMeta, ...meta }) as LogMeta;
 };
 
-export const logWarn = async (message: string, meta?: LogMeta): Promise<void> => {
-  const payloadMeta = normalizeMeta(meta);
-  console.warn(formatLogOutput("warn", message, payloadMeta));
+const shouldReportToPm = (level: LogLevel): boolean => {
+  return level === "error" || level === "warn";
 };
 
-export const logError = async (message: string, meta?: unknown): Promise<void> => {
-  const payloadMeta = normalizeMeta(meta);
-  console.error(formatLogOutput("error", message, payloadMeta));
+const reportLog = async (level: PMLevel, message: string, meta: LogMeta, err?: unknown) => {
+  if (!shouldReportToPm(level)) {
+    return;
+  }
+  await reportToPM(level, message, meta, err);
+};
+
+export const logInfo = async (code: string, meta?: LogMeta): Promise<void> => {
+  const payloadMeta = enrichMeta(normalizeMeta(meta));
+  console.log(formatLogOutput("info", code, payloadMeta));
+};
+
+export const logWarn = async (code: string, meta?: LogMeta): Promise<void> => {
+  const payloadMeta = enrichMeta(normalizeMeta(meta));
+  console.warn(formatLogOutput("warn", code, payloadMeta));
+  await reportLog("warn", code, payloadMeta);
+};
+
+export const logError = async (code: string, meta?: LogMeta, err?: unknown): Promise<void> => {
+  const payloadMeta = enrichMeta(normalizeMeta(meta));
+  if (err) {
+    payloadMeta.error = formatErrorDetails(err);
+  }
+  console.error(formatLogOutput("error", code, payloadMeta));
+  await reportLog("error", code, payloadMeta, err);
 };
 
 export const sendPingTest = async (): Promise<void> => {

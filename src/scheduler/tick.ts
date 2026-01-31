@@ -8,8 +8,9 @@ import {
   type RadarFetchConfig,
   type RadarChartData,
 } from "../radar/fetch.js";
-import { logError } from "../logger.js";
+import { logError, logInfo, logWarn } from "../logger.js";
 import { getRadarSettings } from "../db/settings.js";
+import { isRadarTokenValidFormat } from "../radar/client.js";
 import { getSchedulerBackoffMinutes } from "./backoff.js";
 
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -40,18 +41,14 @@ const formatTimestamp = (timezone: string): string => {
 const buildRadarFetchConfig = (
   config: EnvConfig,
   token: string | null,
-  mode: RadarFetchConfig["mode"]
-): RadarFetchConfig => {
-  return {
-    mode,
-    token,
-    publicBaseUrl: config.radar.publicBaseUrl,
-    tokenBaseUrl: config.radar.tokenBaseUrl,
-    timeoutMs: config.radar.httpTimeoutMs,
-    retryMax: config.radar.retryMax,
-    retryBaseDelayMs: config.radar.retryBaseDelayMs,
-  };
-};
+  mode: RadarFetchConfig["mode"],
+  dateRangePreset: RadarFetchConfig["dateRangePreset"]
+): RadarFetchConfig => ({
+  mode,
+  token,
+  timeoutMs: config.radar.httpTimeoutMs,
+  dateRangePreset,
+});
 
 const updateScheduleFailure = async (
   prisma: PrismaClient,
@@ -104,10 +101,11 @@ const updateTargetSuccess = async (prisma: PrismaClient, targetChatId: number, n
 const buildChartBuffer = async (
   config: EnvConfig,
   token: string | null,
-  mode: RadarFetchConfig["mode"]
+  mode: RadarFetchConfig["mode"],
+  dateRangePreset: RadarFetchConfig["dateRangePreset"]
 ): Promise<{ buffer: Buffer; radarData: RadarChartData }> => {
-  const radarConfig = buildRadarFetchConfig(config, token, mode);
-  const radarData = await fetchRadarData({ dateRange: "7d", limit: 10 }, radarConfig);
+  const radarConfig = buildRadarFetchConfig(config, token, mode, dateRangePreset);
+  const radarData = await fetchRadarData({ limit: 10 }, radarConfig);
   const buffer = await generateRadarChartPng(
     { labels: radarData.labels, values: radarData.values, title: radarData.label },
     config.defaultTimezone
@@ -139,7 +137,7 @@ export const runSchedulerTick = async (
     });
 
     if (!schedules.length) {
-      console.log("scheduler_tick_no_targets");
+      await logInfo("scheduler_tick_no_targets");
       return;
     }
 
@@ -161,14 +159,6 @@ export const runSchedulerTick = async (
       return;
     }
 
-    const settings = await getRadarSettings(prisma);
-    const mode = settings.radarMode ?? config.radar.mode;
-    const token = settings.radarApiToken ?? config.radar.apiToken;
-    if (mode === "token" && !token) {
-      await logError("scheduler_missing_radar_token", { scope: "scheduler_token_missing" });
-      return;
-    }
-
     const pendingSchedules = dueSchedules.slice(0, config.maxSendsPerTick);
     if (dueSchedules.length > pendingSchedules.length) {
       console.log("scheduler_tick_rate_limited", {
@@ -177,36 +167,6 @@ export const runSchedulerTick = async (
       });
     }
 
-    let buffer: Buffer;
-    let radarData: RadarChartData;
-    try {
-      const result = await buildChartBuffer(config, token, mode);
-      buffer = result.buffer;
-      radarData = result.radarData;
-    } catch (error) {
-      const errorCode = error instanceof RadarFetchError ? error.code : "CHART_RENDER_FAILED";
-      const errorSummary =
-        error instanceof RadarFetchError
-          ? [error.code, error.status, error.errors?.[0]?.message].filter(Boolean).join(":")
-          : "CHART_RENDER_FAILED";
-      await logError("scheduler_capture_failed", { scope: "scheduler_capture_failed", errorCode, error });
-      const failureUpdates = pendingSchedules.map((schedule) =>
-        updateScheduleFailure(prisma, schedule.id, schedule.failCount ?? 0, now)
-      );
-      const targetUpdates = pendingSchedules.map((schedule) => updateTargetFailure(prisma, schedule.targetChatId, now));
-      const sendLogs = pendingSchedules.map((schedule) =>
-        prisma.sendLog.create({
-          data: {
-            targetChatId: schedule.targetChatId,
-            sentAt: now,
-            status: SendStatus.FAIL,
-            error: errorSummary,
-          },
-        })
-      );
-      await Promise.all([...failureUpdates, ...targetUpdates, ...sendLogs]);
-      return;
-    }
 
     const caption = `Cloudflare Radar 🇮🇷\n${formatTimestamp(config.defaultTimezone)}`;
 
@@ -218,7 +178,47 @@ export const runSchedulerTick = async (
         data: { inProgressUntil: lockUntil },
       });
       try {
-        await sender.sendChartToChat(schedule.targetChat.chatId, caption, buffer);
+        const settings = await getRadarSettings(prisma, schedule.targetChat.createdByUserId);
+        const mode = settings.radarMode ?? config.radar.mode;
+        const token = settings.radarApiToken ?? config.radar.apiToken;
+        const dateRangePreset = settings.radarDateRange ?? "D7";
+        if (mode === "token" && !token) {
+          await logError("scheduler_missing_radar_token", {
+            scope: "scheduler_token_missing",
+            targetChatId: schedule.targetChatId,
+          });
+          await updateScheduleFailure(prisma, schedule.id, schedule.failCount ?? 0, sentAt);
+          await updateTargetFailure(prisma, schedule.targetChatId, sentAt);
+          await prisma.sendLog.create({
+            data: {
+              targetChatId: schedule.targetChatId,
+              sentAt,
+              status: SendStatus.FAIL,
+              error: "RADAR_TOKEN_MISSING",
+            },
+          });
+          continue;
+        }
+        if (mode === "token" && token && !isRadarTokenValidFormat(token)) {
+          await logWarn("scheduler_invalid_radar_token", {
+            targetChatId: schedule.targetChatId,
+            mode,
+          });
+          await updateScheduleFailure(prisma, schedule.id, schedule.failCount ?? 0, sentAt);
+          await updateTargetFailure(prisma, schedule.targetChatId, sentAt);
+          await prisma.sendLog.create({
+            data: {
+              targetChatId: schedule.targetChatId,
+              sentAt,
+              status: SendStatus.FAIL,
+              error: "RADAR_TOKEN_INVALID",
+            },
+          });
+          continue;
+        }
+
+        const result = await buildChartBuffer(config, token, mode, dateRangePreset);
+        await sender.sendChartToChat(schedule.targetChat.chatId, caption, result.buffer);
         await updateScheduleSuccess(prisma, schedule.id, sentAt);
         await updateTargetSuccess(prisma, schedule.targetChatId, sentAt);
         await prisma.sendLog.create({
@@ -231,7 +231,12 @@ export const runSchedulerTick = async (
         });
         await delay(200);
       } catch (error) {
-        await logError("scheduler_send_failed", { scope: "scheduler_send_failed", error });
+        const errorCode = error instanceof RadarFetchError ? error.code : "CHART_RENDER_FAILED";
+        await logError(
+          "scheduler_send_failed",
+          { scope: "scheduler_send_failed", errorCode, targetChatId: schedule.targetChatId },
+          error
+        );
         await updateScheduleFailure(prisma, schedule.id, schedule.failCount ?? 0, sentAt);
         await updateTargetFailure(prisma, schedule.targetChatId, sentAt);
         await prisma.sendLog.create({
@@ -244,11 +249,6 @@ export const runSchedulerTick = async (
         });
       }
     }
-
-    console.log("scheduler_tick_completed", {
-      source: radarData.source,
-      endpoint: radarData.endpoint,
-    });
   } finally {
     state.isTickRunning = false;
   }
