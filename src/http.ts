@@ -13,7 +13,7 @@ http.interceptors.response.use(
       response: error.response?.data ?? error.message,
     };
 
-    await logError("HTTP request failed", { details });
+    await logError("http_request_failed", { details }, error);
     return Promise.reject(error);
   }
 );

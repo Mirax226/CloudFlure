@@ -1,5 +1,5 @@
-import { logError } from "../logger.js";
-import { radarRequest } from "./client.js";
+import { logError, logWarn } from "../logger.js";
+import { requestRadar, RadarHttpError, probeRadarPublicEndpoint, isRadarTokenValidFormat } from "./client.js";
 import {
   buildEndpointParams,
   DEFAULT_RADAR_ENDPOINT,
@@ -7,17 +7,15 @@ import {
   type RadarEndpointDefinition,
   type RadarEndpointParams,
 } from "./endpoints.js";
+import { rangePresetToApiParams, type RadarDateRangePreset, type RadarApiDateRangeParams } from "./dateRange.js";
 
 export type RadarMode = "public" | "token" | "auto";
 
 export type RadarFetchConfig = {
   mode: RadarMode;
   token?: string | null;
-  publicBaseUrl: string;
-  tokenBaseUrl: string;
   timeoutMs: number;
-  retryMax: number;
-  retryBaseDelayMs: number;
+  dateRangePreset: RadarDateRangePreset;
 };
 
 export type RadarChartData = {
@@ -26,6 +24,7 @@ export type RadarChartData = {
   source: "public" | "token";
   endpoint: string;
   params: RadarEndpointParams;
+  dateRangePreset: RadarDateRangePreset;
   label: string;
 };
 
@@ -48,6 +47,8 @@ export class RadarFetchError extends Error {
   endpoint?: string;
   params?: RadarEndpointParams;
   timingMs?: number;
+  responseBody?: string;
+  modeUsed?: "public" | "token";
 
   constructor(
     code: RadarErrorCode,
@@ -58,6 +59,8 @@ export class RadarFetchError extends Error {
       endpoint?: string;
       params?: RadarEndpointParams;
       timingMs?: number;
+      responseBody?: string;
+      modeUsed?: "public" | "token";
     }
   ) {
     super(message);
@@ -67,6 +70,8 @@ export class RadarFetchError extends Error {
     this.endpoint = meta?.endpoint;
     this.params = meta?.params;
     this.timingMs = meta?.timingMs;
+    this.responseBody = meta?.responseBody;
+    this.modeUsed = meta?.modeUsed;
   }
 }
 
@@ -159,10 +164,10 @@ const buildRadarChartData = (
 
 const mapRadarError = (
   status: number,
-  timingMs: number,
   endpoint: RadarEndpointDefinition,
   params: RadarEndpointParams,
-  errors: { code?: number | string; message?: string }[]
+  responseBody?: string,
+  modeUsed?: "public" | "token"
 ): RadarFetchError => {
   const code: RadarErrorCode =
     status === 400
@@ -178,10 +183,10 @@ const mapRadarError = (
               : "RADAR_NETWORK";
   return new RadarFetchError(code, `Radar API responded with status ${status}`, {
     status,
-    errors,
     endpoint: endpoint.path,
     params,
-    timingMs,
+    responseBody,
+    modeUsed,
   });
 };
 
@@ -189,7 +194,8 @@ const fetchFromSource = async (
   params: RadarEndpointParams,
   config: RadarFetchConfig,
   endpoint: RadarEndpointDefinition,
-  source: "public" | "token"
+  source: "public" | "token",
+  dateRangeParams: RadarApiDateRangeParams
 ): Promise<RadarChartData> => {
   if (source === "token" && !config.token) {
     throw new RadarFetchError("RADAR_TOKEN_MISSING", "Radar API token is missing", {
@@ -198,59 +204,89 @@ const fetchFromSource = async (
     });
   }
 
-  const normalizedParams = buildEndpointParams(params, endpoint);
-  const baseUrl = source === "public" ? config.publicBaseUrl : config.tokenBaseUrl;
+  const normalizedParams = buildEndpointParams({ ...params, ...dateRangeParams }, endpoint);
 
-  const response = await radarRequest({
-    baseUrl,
-    path: endpoint.path,
-    params: normalizedParams,
-    token: source === "token" ? config.token : null,
-    timeoutMs: config.timeoutMs,
-    retryMax: config.retryMax,
-    retryBaseDelayMs: config.retryBaseDelayMs,
-  });
-
-  if (!response.ok) {
+  let response: { data: { success?: boolean; result?: unknown; errors?: { message?: string }[] } };
+  let modeUsed: "public" | "token" = source;
+  try {
+    const result = await requestRadar<{ success?: boolean; result?: unknown; errors?: { message?: string }[] }>(
+      endpoint.path,
+      normalizedParams,
+      source,
+      source === "token" ? config.token ?? undefined : undefined,
+      { timeoutMs: config.timeoutMs }
+    );
+    response = { data: result.data };
+    modeUsed = result.meta.modeUsed;
+  } catch (error) {
+    if (error instanceof RadarHttpError) {
+      await logError("radar_fetch_failed", {
+        status: error.status,
+        endpoint: error.path,
+        params: error.params,
+        modeUsed: error.modeAttempted,
+        responseBody: error.responseBody,
+        dateRangePreset: config.dateRangePreset,
+      });
+      throw mapRadarError(error.status, endpoint, normalizedParams, error.responseBody, error.modeAttempted);
+    }
     await logError("radar_fetch_failed", {
-      status: response.status,
-      errors: response.errors,
+      status: 0,
       endpoint: endpoint.path,
       params: normalizedParams,
-      source,
+      modeUsed: source,
+      dateRangePreset: config.dateRangePreset,
+    }, error);
+    throw new RadarFetchError("RADAR_NETWORK", "Radar API request failed", {
+      status: 0,
+      endpoint: endpoint.path,
+      params: normalizedParams,
+      modeUsed: source,
     });
-    throw mapRadarError(response.status, response.timingMs, endpoint, normalizedParams, response.errors);
   }
 
-  const { labels, values } = buildRadarChartData(response.result, normalizedParams.limit ?? endpoint.defaults.limit);
-  if (!validateRadarData(labels, values)) {
-    throw new RadarFetchError("RADAR_EMPTY_DATA", "Radar API returned empty data", {
-      status: response.status,
-      errors: response.errors,
+  const payload = response.data;
+  if (!payload || typeof payload.success !== "boolean") {
+    throw new RadarFetchError("RADAR_INVALID_DATA", "Radar API returned invalid response", {
+      status: 200,
       endpoint: endpoint.path,
       params: normalizedParams,
-      timingMs: response.timingMs,
+      modeUsed,
+    });
+  }
+  if (!payload.success) {
+    const summary = payload.errors?.[0]?.message ?? "Radar API responded with errors";
+    throw new RadarFetchError("RADAR_INVALID_DATA", summary, {
+      status: 200,
+      endpoint: endpoint.path,
+      params: normalizedParams,
+      modeUsed,
+    });
+  }
+
+  const { labels, values } = buildRadarChartData(payload.result, normalizedParams.limit ?? endpoint.defaults.limit);
+  if (!validateRadarData(labels, values)) {
+    throw new RadarFetchError("RADAR_EMPTY_DATA", "Radar API returned empty data", {
+      status: 200,
+      endpoint: endpoint.path,
+      params: normalizedParams,
+      modeUsed,
     });
   }
 
   return {
     labels,
     values,
-    source,
+    source: modeUsed,
     endpoint: endpoint.path,
     params: normalizedParams,
+    dateRangePreset: config.dateRangePreset,
     label: endpoint.label,
   };
 };
 
-const shouldFallbackToToken = (error: RadarFetchError): boolean => {
-  return (
-    error.code === "RADAR_UNAUTHORIZED" ||
-    error.code === "RADAR_RATE_LIMIT" ||
-    error.code === "RADAR_UPSTREAM" ||
-    error.code === "RADAR_TIMEOUT" ||
-    error.code === "RADAR_NETWORK"
-  );
+const isFallbackForPublic = (error: RadarFetchError): boolean => {
+  return error.code === "RADAR_BAD_REQUEST" || error.code === "RADAR_UNAUTHORIZED" || error.status === 404;
 };
 
 export const fetchRadarData = async (
@@ -258,6 +294,31 @@ export const fetchRadarData = async (
   config: RadarFetchConfig,
   endpoint: RadarEndpointDefinition = DEFAULT_RADAR_ENDPOINT
 ): Promise<RadarChartData> => {
+  const { primary, fallback } = rangePresetToApiParams(config.dateRangePreset);
+  const dateRangeParams = config.mode === "public"
+    ? await resolvePublicDateRangeParams(primary, fallback)
+    : primary;
+
+  const fetchWithFallback = async (
+    source: "public" | "token",
+    rangeParams: RadarApiDateRangeParams,
+    allowFallback: boolean
+  ): Promise<RadarChartData> => {
+    try {
+      return await fetchFromSource(params, config, endpoint, source, rangeParams);
+    } catch (error) {
+      const radarError = error as RadarFetchError;
+      if (allowFallback && radarError instanceof RadarFetchError && radarError.code === "RADAR_BAD_REQUEST" && fallback) {
+        await logWarn("radar_range_fallback_used", {
+          preset: config.dateRangePreset,
+          usedParams: fallback,
+        });
+        return await fetchFromSource(params, config, endpoint, source, fallback);
+      }
+      throw error;
+    }
+  };
+
   if (config.mode === "public") {
     if (!endpoint.supportsPublic) {
       throw new RadarFetchError("RADAR_PUBLIC_UNSUPPORTED", "Public not available for this chart", {
@@ -265,26 +326,51 @@ export const fetchRadarData = async (
         params,
       });
     }
-    return fetchFromSource(params, config, endpoint, "public");
+    return fetchWithFallback("public", dateRangeParams, true);
   }
 
   if (config.mode === "token") {
-    return fetchFromSource(params, config, endpoint, "token");
+    if (!isRadarTokenValidFormat(config.token ?? null)) {
+      throw new RadarFetchError("RADAR_UNAUTHORIZED", "Radar token format is invalid", {
+        endpoint: endpoint.path,
+        params,
+        modeUsed: "token",
+      });
+    }
+    return fetchWithFallback("token", primary, true);
   }
 
   if (!endpoint.supportsPublic) {
-    return fetchFromSource(params, config, endpoint, "token");
+    return fetchWithFallback("token", primary, true);
+  }
+
+  if (!isRadarTokenValidFormat(config.token ?? null)) {
+    await logWarn("radar_auto_invalid_token_fallback_public", {
+      endpoint: endpoint.path,
+      params,
+      modeUsed: "token",
+      dateRangePreset: config.dateRangePreset,
+    });
+    return fetchWithFallback("public", dateRangeParams, true);
   }
 
   try {
-    return await fetchFromSource(params, config, endpoint, "public");
+    return await fetchWithFallback("token", primary, true);
   } catch (error) {
     if (error instanceof RadarConfigError) {
       throw error;
     }
     const radarError = error as RadarFetchError;
-    if (radarError instanceof RadarFetchError && shouldFallbackToToken(radarError)) {
-      return await fetchFromSource(params, config, endpoint, "token");
+    if (radarError instanceof RadarFetchError && isFallbackForPublic(radarError)) {
+      await logWarn("radar_auto_fallback_public", {
+        endpoint: endpoint.path,
+        params: radarError.params ?? params,
+        status: radarError.status,
+        modeUsed: radarError.modeUsed,
+        responseBody: radarError.responseBody,
+        dateRangePreset: config.dateRangePreset,
+      });
+      return await fetchFromSource(params, config, endpoint, "public", dateRangeParams);
     }
     throw radarError;
   }
@@ -298,17 +384,7 @@ export type RadarDiagnostics = {
   status: number | null;
   timingMs: number | null;
   errorSummary: string | null;
-};
-
-const summarizeErrors = (errors?: { code?: number | string; message?: string }[]): string | null => {
-  if (!errors || errors.length === 0) {
-    return null;
-  }
-  const first = errors[0];
-  if (first.code && first.message) {
-    return `${first.code}: ${first.message}`;
-  }
-  return first.message ?? String(first.code ?? "Unknown error");
+  responseBody?: string | null;
 };
 
 export const diagnoseRadar = async (
@@ -316,103 +392,80 @@ export const diagnoseRadar = async (
   config: RadarFetchConfig,
   endpoint: RadarEndpointDefinition = DEFAULT_RADAR_ENDPOINT
 ): Promise<RadarDiagnostics> => {
-  const normalizedParams = buildEndpointParams(params, endpoint);
+  const { primary } = rangePresetToApiParams(config.dateRangePreset);
+  const normalizedParams = buildEndpointParams({ ...params, ...primary }, endpoint);
   const buildResult = (
     source: "public" | "token",
     status: number,
-    timingMs: number,
-    errors?: { code?: number | string; message?: string }[]
+    responseBody?: string
   ): RadarDiagnostics => ({
     configuredMode: config.mode,
     effectiveSource: source,
     endpoint: endpoint.path,
     params: normalizedParams,
     status,
-    timingMs,
-    errorSummary: summarizeErrors(errors),
+    timingMs: null,
+    errorSummary: responseBody ? truncateErrorBody(responseBody) : null,
+    responseBody,
   });
 
-  if (config.mode === "public") {
-    if (!endpoint.supportsPublic) {
-      return {
-        configuredMode: config.mode,
-        effectiveSource: null,
-        endpoint: endpoint.path,
-        params: normalizedParams,
-        status: null,
-        timingMs: null,
-        errorSummary: "Public not available for this chart",
-      };
+  try {
+    const result = await requestRadar(endpoint.path, normalizedParams, config.mode, config.token ?? undefined, {
+      timeoutMs: config.timeoutMs,
+    });
+    return buildResult(result.meta.modeUsed, result.meta.status);
+  } catch (error) {
+    if (error instanceof RadarHttpError) {
+      return buildResult(error.modeAttempted, error.status, error.responseBody);
     }
-    const response = await radarRequest({
-      baseUrl: config.publicBaseUrl,
-      path: endpoint.path,
-      params: normalizedParams,
-      timeoutMs: config.timeoutMs,
-      retryMax: config.retryMax,
-      retryBaseDelayMs: config.retryBaseDelayMs,
+    return buildResult("public", 0, "Unknown error");
+  }
+};
+
+const truncateErrorBody = (body: string): string => {
+  if (body.length <= 200) {
+    return body;
+  }
+  return `${body.slice(0, 200)}…`;
+};
+
+const resolvePublicDateRangeParams = async (
+  primary: RadarApiDateRangeParams,
+  fallback?: RadarApiDateRangeParams
+): Promise<RadarApiDateRangeParams> => {
+  const contract = await probeRadarPublicEndpoint();
+  if (contract.paramMode === "sinceUntil" && primary.since && primary.until) {
+    return primary;
+  }
+  if (contract.paramMode === "sinceUntil" && primary.dateRange) {
+    const converted = convertDateRangeToSinceUntil(primary.dateRange);
+    if (converted) {
+      return converted;
+    }
+  }
+  if (contract.paramMode === "dateRange" && primary.dateRange) {
+    return primary;
+  }
+  if (fallback) {
+    await logWarn("radar_public_range_fallback_used", {
+      presetFallback: fallback,
+      modeUsed: "public",
     });
-    return buildResult("public", response.status, response.timingMs, response.errors);
+    return fallback;
   }
+  return primary;
+};
 
-  if (config.mode === "token") {
-    const response = await radarRequest({
-      baseUrl: config.tokenBaseUrl,
-      path: endpoint.path,
-      params: normalizedParams,
-      token: config.token,
-      timeoutMs: config.timeoutMs,
-      retryMax: config.retryMax,
-      retryBaseDelayMs: config.retryBaseDelayMs,
-    });
-    return buildResult("token", response.status, response.timingMs, response.errors);
+const convertDateRangeToSinceUntil = (dateRange: string): RadarApiDateRangeParams | null => {
+  const match = dateRange.match(/^(\d+)d$/);
+  if (!match) {
+    return null;
   }
-
-  if (!endpoint.supportsPublic) {
-    const response = await radarRequest({
-      baseUrl: config.tokenBaseUrl,
-      path: endpoint.path,
-      params: normalizedParams,
-      token: config.token,
-      timeoutMs: config.timeoutMs,
-      retryMax: config.retryMax,
-      retryBaseDelayMs: config.retryBaseDelayMs,
-    });
-    return buildResult("token", response.status, response.timingMs, response.errors);
+  const days = Number(match[1]);
+  if (!Number.isFinite(days) || days <= 0) {
+    return null;
   }
-
-  const publicResponse = await radarRequest({
-    baseUrl: config.publicBaseUrl,
-    path: endpoint.path,
-    params: normalizedParams,
-    timeoutMs: config.timeoutMs,
-    retryMax: config.retryMax,
-    retryBaseDelayMs: config.retryBaseDelayMs,
-  });
-  if (publicResponse.ok) {
-    return buildResult("public", publicResponse.status, publicResponse.timingMs, publicResponse.errors);
-  }
-
-  const publicError = mapRadarError(
-    publicResponse.status,
-    publicResponse.timingMs,
-    endpoint,
-    normalizedParams,
-    publicResponse.errors
-  );
-
-  if (shouldFallbackToToken(publicError)) {
-    const tokenResponse = await radarRequest({
-      baseUrl: config.tokenBaseUrl,
-      path: endpoint.path,
-      params: normalizedParams,
-      token: config.token,
-      timeoutMs: config.timeoutMs,
-      retryMax: config.retryMax,
-      retryBaseDelayMs: config.retryBaseDelayMs,
-    });
-    return buildResult("token", tokenResponse.status, tokenResponse.timingMs, tokenResponse.errors);
-  }
-
-  return buildResult("public", publicResponse.status, publicResponse.timingMs, publicResponse.errors);
+  const until = new Date();
+  const since = new Date(until.getTime() - days * 24 * 60 * 60 * 1000);
+  return { since: since.toISOString(), until: until.toISOString() };
 };
