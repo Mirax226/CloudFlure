@@ -34,13 +34,14 @@ DATABASE_URL=postgresql://...
 PUBLIC_URL=https://your-service.onrender.com
 RADAR_MODE=auto           # public | token | auto
 RADAR_API_TOKEN=...
-RADAR_PUBLIC_BASE_URL=https://api.cloudflare.com/client/v4/radar
-RADAR_TOKEN_BASE_URL=https://api.cloudflare.com/client/v4/radar
 RADAR_HTTP_TIMEOUT_MS=45000
 RADAR_RETRY_MAX=2
 RADAR_RETRY_BASE_DELAY_MS=1500
 SCREENSHOT_COOLDOWN_SEC=30
 MAX_SENDS_PER_TICK=20
+PM_BASE_URL=https://your-pm-host
+PATH_APPLIER_TOKEN=...
+PM_PROJECT_NAME=cloudflare-radar-bot
 ```
 
 توکن Radar API را داخل منوی ربات تنظیم کنید (یا از `RADAR_API_TOKEN`).
@@ -67,16 +68,16 @@ ${PUBLIC_URL}/telegram
 ## Radar mode
 - `public`: فقط endpoint عمومی (بدون توکن)
 - `token`: فقط با توکن
-- `auto`: اول public، در صورت خطاهای مجاز به token fallback می‌کند (در صورت وجود توکن)
+- `auto`: اول token (در صورت وجود)، و در خطاهای مجاز یک‌بار به public fallback می‌کند
 
 تنظیم از داخل ربات:
 - منو → «📡 منبع دیتا»
 - یا با `RADAR_MODE` در env
 
 ## Radar test command
-برای تست سریع:
+برای تست سریع مسیر API:
 ```
-/radar_test
+npx ts-node-dev --transpile-only scripts/test-radar.ts
 ```
 
 ## Targets

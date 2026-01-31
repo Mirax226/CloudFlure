@@ -9,7 +9,7 @@ export const labels = {
   toggleTarget: "✅ فعال/غیرفعال مقصد",
   setRadarToken: "🗝️ تنظیم توکن Radar API",
   setRadarSource: "📡 منبع دیتا",
-  setRadarDateRange: "بازه زمانی چارت 📆",
+  setRadarDateRange: "بازه زمانی چارت 📅",
   help: "🧩 راهنما",
 };
 
