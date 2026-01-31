@@ -4,6 +4,7 @@ import { prisma } from "./db/prisma.js";
 import { createBot, type BotState } from "./bot.js";
 import { runSchedulerTick } from "./scheduler/tick.js";
 import { logError, logInfo, logWarn } from "./logger.js";
+import { buildRadarUrl } from "./radar/client.js";
 
 const config = loadConfig();
 console.log("Config loaded", {
@@ -12,7 +13,7 @@ console.log("Config loaded", {
   radarMode: config.radar.mode,
 });
 void logInfo("radar_client_ready", {
-  baseUrl: "https://api.cloudflare.com/client/v4/radar",
+  exampleUrl: buildRadarUrl("/traffic/countries", { limit: 10, dateRange: "7d" }),
 });
 if (!config.pm.enabled) {
   void logWarn("pm_disabled", {

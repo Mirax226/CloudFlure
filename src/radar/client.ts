@@ -1,7 +1,8 @@
 import axios from "axios";
 import { logInfo, logWarn } from "../logger.js";
 
-export const CF_API_BASE = "https://api.cloudflare.com/client/v4";
+export const CF_ORIGIN = "https://api.cloudflare.com";
+export const CF_API_BASE = `${CF_ORIGIN}/client/v4`;
 export const RADAR_BASE = `${CF_API_BASE}/radar`;
 
 export type RadarAuthMode = "public" | "token" | "auto";
@@ -12,13 +13,23 @@ export type RadarRequestMeta = {
   modeUsed: "public" | "token";
 };
 
+export class RadarAuthError extends Error {
+  code: "missing_token";
+
+  constructor(code: "missing_token", message: string) {
+    super(message);
+    this.name = "RadarAuthError";
+    this.code = code;
+  }
+}
+
 export class RadarHttpError extends Error {
   status: number;
   url: string;
   path: string;
   params: Record<string, string | number | boolean | undefined>;
-  modeAttempted: "public" | "token";
-  responseBody: string;
+  modeUsed: "public" | "token";
+  responseBodyTrunc: string;
 
   constructor(message: string, details: Omit<RadarHttpError, "name" | "message">) {
     super(message);
@@ -27,8 +38,8 @@ export class RadarHttpError extends Error {
     this.url = details.url;
     this.path = details.path;
     this.params = details.params;
-    this.modeAttempted = details.modeAttempted;
-    this.responseBody = details.responseBody;
+    this.modeUsed = details.modeUsed;
+    this.responseBodyTrunc = details.responseBodyTrunc;
   }
 }
 
@@ -38,13 +49,19 @@ const DEFAULT_TIMEOUT_MS = 15_000;
 
 const truncate = (value: string, maxChars: number) => (value.length > maxChars ? `${value.slice(0, maxChars)}…` : value);
 
-export const buildUrl = (
+export const buildRadarUrl = (
   path: string,
   params: Record<string, string | number | boolean | undefined>
 ): string => {
-  const url = new URL(path.replace(/^\//, ""), `${RADAR_BASE}/`);
+  if (!path.startsWith("/")) {
+    throw new Error("Radar path must start with '/'");
+  }
+  if (!RADAR_BASE.includes("/client/v4/radar")) {
+    throw new Error("Radar base misconfigured");
+  }
+  const url = new URL(path.slice(1), `${RADAR_BASE}/`);
   Object.entries(params).forEach(([key, value]) => {
-    if (value === undefined) {
+    if (value === undefined || value === null) {
       return;
     }
     url.searchParams.set(key, String(value));
@@ -66,7 +83,7 @@ const executeRequest = async <T>(
   token: string | undefined,
   timeoutMs: number
 ): Promise<{ data: T; meta: RadarRequestMeta }> => {
-  const url = buildUrl(path, params);
+  const url = buildRadarUrl(path, params);
   const headers: Record<string, string> = {
     Accept: "application/json",
     "User-Agent": USER_AGENT,
@@ -89,8 +106,8 @@ const executeRequest = async <T>(
       url,
       path,
       params,
-      modeAttempted: modeUsed,
-      responseBody: truncate(responseBody, RESPONSE_BODY_LIMIT),
+      modeUsed,
+      responseBodyTrunc: truncate(responseBody, RESPONSE_BODY_LIMIT),
     });
   }
   return { data: response.data as T, meta: { url, status, modeUsed } };
@@ -106,28 +123,30 @@ export const requestRadar = async <T>(
   options?: { timeoutMs?: number }
 ): Promise<{ data: T; meta: RadarRequestMeta }> => {
   const timeoutMs = options?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const tokenValue = token?.trim();
   if (mode === "public") {
     return executeRequest<T>(path, params, "public", undefined, timeoutMs);
   }
 
   if (mode === "token") {
-    return executeRequest<T>(path, params, "token", token, timeoutMs);
+    if (!tokenValue) {
+      throw new RadarAuthError("missing_token", "Radar API token is missing");
+    }
+    return executeRequest<T>(path, params, "token", tokenValue, timeoutMs);
   }
 
-  if (token) {
+  if (tokenValue) {
     try {
-      return await executeRequest<T>(path, params, "token", token, timeoutMs);
+      return await executeRequest<T>(path, params, "token", tokenValue, timeoutMs);
     } catch (error) {
-      if (error instanceof RadarHttpError) {
-        if (isFallbackStatus(error.status)) {
-          await logWarn("radar_auto_token_fallback_public", {
-            status: error.status,
-            endpoint: path,
-            params,
-            modeUsed: "token",
-          });
-          return executeRequest<T>(path, params, "public", undefined, timeoutMs);
-        }
+      if (error instanceof RadarHttpError && isFallbackStatus(error.status)) {
+        await logWarn("radar_auto_token_fallback_public", {
+          status: error.status,
+          endpoint: path,
+          params,
+          modeUsed: "token",
+        });
+        return executeRequest<T>(path, params, "public", undefined, timeoutMs);
       }
       throw error;
     }
@@ -197,8 +216,8 @@ export const probeRadarPublicEndpoint = async (): Promise<PublicContract> => {
       return cachedPublicContract;
     } catch (error) {
       if (error instanceof RadarHttpError) {
-        lastErrorBody = error.responseBody;
-        const derived = deriveContractFromError(error.responseBody);
+        lastErrorBody = error.responseBodyTrunc;
+        const derived = deriveContractFromError(error.responseBodyTrunc);
         if (derived.paramMode && derived.paramMode !== candidate.paramMode) {
           const params = derived.paramMode === "sinceUntil" ? buildProbeSinceUntilParams() : buildProbeDateRangeParams();
           candidates.push({ path: basePath, paramMode: derived.paramMode, params });

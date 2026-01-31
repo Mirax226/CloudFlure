@@ -53,7 +53,7 @@ const sanitizeValue = (value: unknown, depth = 0): unknown => {
     return {
       name: value.name,
       message: value.message,
-      stack: value.stack ? truncate(value.stack, MAX_STACK_CHARS) : undefined,
+      stackTrunc: value.stack ? truncate(value.stack, MAX_STACK_CHARS) : undefined,
     };
   }
   if (Array.isArray(value)) {
@@ -152,16 +152,15 @@ export const reportToPM = async (
     meta: metaPayload,
   });
 
-  const primaryUrl = `${baseUrl.replace(/\/$/, "")}/api/logs`;
-  const fallbackUrl = `${baseUrl.replace(/\/$/, "")}/api/pm/logs`;
+  const url = `${baseUrl.replace(/\/$/, "")}/api/logs`;
 
   try {
-    const primaryOk = await postPayload(primaryUrl, payload, token);
+    const primaryOk = await postPayload(url, payload, token);
     if (primaryOk) {
       return;
     }
     await wait(RETRY_DELAY_MS);
-    await postPayload(fallbackUrl, payload, token);
+    await postPayload(url, payload, token);
   } catch (error) {
     console.error("pm_report_failed", { error: error instanceof Error ? error.message : String(error) });
   }

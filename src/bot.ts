@@ -22,7 +22,7 @@ import { isRadarTokenValidFormat } from "./radar/client.js";
 export type BotState = {
   lastSendByUserId: Map<number, number>;
   lastRadarSourceByUserId: Map<number, "public" | "token">;
-  inFlightByUserId: Map<number, Promise<void>>;
+  inFlightByUserId: Map<number, boolean>;
 };
 
 const formatTimestamp = (timezone: string): string => {
@@ -78,6 +78,11 @@ const buildUserFacingError = (error: unknown, mode?: RadarMode): string => {
   }
 
   if (error instanceof RadarFetchError) {
+    const responseBody = error.responseBody ?? "";
+    const hasRouteError = responseBody.includes("No route for that URI") || responseBody.includes("7000");
+    if (hasRouteError) {
+      return "مسیر API اشتباه است (RADAR_ROUTE_INVALID). در حال اصلاح.";
+    }
     const code = formatErrorCode(error.status);
     switch (error.code) {
       case "RADAR_PUBLIC_UNSUPPORTED":
@@ -88,15 +93,15 @@ const buildUserFacingError = (error: unknown, mode?: RadarMode): string => {
         if (mode === "public") {
           return "Public برای این چارت فعال نیست. حالت Token رو انتخاب کن.";
         }
-        return `توکن/دسترسی نامعتبر. کد خطا: ${code}`;
+        return "توکن/دسترسی معتبر نیست.";
       case "RADAR_BAD_REQUEST":
         return `خطای تنظیمات درخواست (400). کد خطا: ${code}`;
       case "RADAR_RATE_LIMIT":
-        return `محدودیت درخواست. کد خطا: ${code}`;
+        return "محدودیت درخواست.";
       case "RADAR_TIMEOUT":
       case "RADAR_UPSTREAM":
       case "RADAR_NETWORK":
-        return `مشکل موقت سرویس. کد خطا: ${code}`;
+        return "مشکل موقت سمت سرویس.";
       case "RADAR_INVALID_DATA":
       case "RADAR_EMPTY_DATA":
         return `دیتای معتبر دریافت نشد. کد خطا: ${code}`;
@@ -166,94 +171,89 @@ export const createBot = (prisma: PrismaClient, config: EnvConfig, state: BotSta
       await ctx.reply("کاربر نامعتبره، دوباره تلاش کن.");
       return;
     }
-    const inFlight = state.inFlightByUserId.get(tgUserId);
-    if (inFlight) {
+    if (state.inFlightByUserId.get(tgUserId)) {
       await ctx.reply("در حال آماده‌سازی... کمی صبر کن ⏳");
       return;
     }
 
-    const task = (async () => {
-    const now = Date.now();
-    const lastSent = state.lastSendByUserId.get(tgUserId);
-    if (lastSent && now - lastSent < config.screenshotCooldownSec * 1000) {
-      await ctx.reply("کمی صبر کن تا دوباره ارسال کنیم ⏳");
-      return;
-    }
-
-    const user = await prisma.user.upsert({
-      where: { tgUserId: BigInt(tgUserId) },
-      update: {},
-      create: { tgUserId: BigInt(tgUserId) },
-    });
-
-    const privateChatId = user.privateChatId ?? (ctx.chat?.id ? BigInt(ctx.chat.id) : null);
-    if (!privateChatId) {
-      await ctx.reply("چت نامعتبره، دوباره تلاش کن.");
-      return;
-    }
-
-    const selectedTarget = user.selectedTargetId
-      ? await prisma.targetChat.findUnique({ where: { id: user.selectedTargetId } })
-      : null;
-    const shouldSendToTarget = Boolean(selectedTarget?.isEnabled);
-
-    const { fetchConfig, mode, token, dateRangePreset } = await resolveRadarFetchConfig(prisma, config, user.id);
-    if (mode === "token" && !token) {
-      await ctx.reply("توکن Radar API تنظیم نشده. از منوی 🗝️ توکن رو ثبت کن.");
-      return;
-    }
-    if (mode === "token" && token && !isRadarTokenValidFormat(token)) {
-      await logWarn("send_now_invalid_token_format", { tgUserId, mode });
-      await ctx.reply("توکن/دسترسی نامعتبر. کد خطا: RADAR_401");
-      return;
-    }
-
-    await ctx.reply("⏳ در حال آماده‌سازی چارت…");
-
-    let radarData: RadarChartData;
+    state.inFlightByUserId.set(tgUserId, true);
     try {
-      radarData = await fetchRadarData({ limit: 10 }, fetchConfig);
-    } catch (error) {
-      await logError(
-        "send_now_radar_fetch_failed",
-        {
-          tgUserId,
-          mode,
-          dateRangePreset,
-        },
-        error
-      );
-      await ctx.reply(buildUserFacingError(error, mode));
-      return;
-    }
-
-    let buffer: Buffer;
-    try {
-      buffer = await generateRadarChartPng(buildChartSeries(radarData), config.defaultTimezone);
-    } catch (error) {
-      await logError("send_now_chart_failed", { tgUserId, dateRangePreset }, error);
-      await ctx.reply(buildUserFacingError(error, mode));
-      return;
-    }
-
-    const caption = `Cloudflare Radar 🇮🇷\n${formatTimestamp(config.defaultTimezone)}`;
-    try {
-      await sendChartToChat(privateChatId, caption, buffer);
-      if (shouldSendToTarget && selectedTarget) {
-        await sendChartToChat(selectedTarget.chatId, caption, buffer);
+      const now = Date.now();
+      const lastSent = state.lastSendByUserId.get(tgUserId);
+      if (lastSent && now - lastSent < config.screenshotCooldownSec * 1000) {
+        await ctx.reply("کمی صبر کن تا دوباره ارسال کنیم ⏳");
+        return;
       }
-      state.lastSendByUserId.set(tgUserId, Date.now());
-      state.lastRadarSourceByUserId.set(tgUserId, radarData.source);
-      await ctx.reply("چارت ارسال شد ✅");
-    } catch (error) {
-      await logError("send_now_send_failed", { tgUserId }, error);
-      await ctx.reply("ارسال چارت ناموفق بود. لطفاً دوباره امتحان کن.");
-    }
-    })();
 
-    state.inFlightByUserId.set(tgUserId, task);
-    try {
-      await task;
+      const user = await prisma.user.upsert({
+        where: { tgUserId: BigInt(tgUserId) },
+        update: {},
+        create: { tgUserId: BigInt(tgUserId) },
+      });
+
+      const privateChatId = user.privateChatId ?? (ctx.chat?.id ? BigInt(ctx.chat.id) : null);
+      if (!privateChatId) {
+        await ctx.reply("چت نامعتبره، دوباره تلاش کن.");
+        return;
+      }
+
+      const selectedTarget = user.selectedTargetId
+        ? await prisma.targetChat.findUnique({ where: { id: user.selectedTargetId } })
+        : null;
+      const shouldSendToTarget = Boolean(selectedTarget?.isEnabled);
+
+      const { fetchConfig, mode, token, dateRangePreset } = await resolveRadarFetchConfig(prisma, config, user.id);
+      if (mode === "token" && !token) {
+        await ctx.reply("توکن Radar API تنظیم نشده. از منوی 🗝️ توکن رو ثبت کن.");
+        return;
+      }
+      if (mode === "token" && token && !isRadarTokenValidFormat(token)) {
+        await logWarn("send_now_invalid_token_format", { tgUserId, mode });
+        await ctx.reply("توکن/دسترسی معتبر نیست.");
+        return;
+      }
+
+      await ctx.reply("⏳ در حال آماده‌سازی چارت…");
+
+      let radarData: RadarChartData;
+      try {
+        radarData = await fetchRadarData({ limit: 10 }, fetchConfig);
+      } catch (error) {
+        await logError(
+          "send_now_radar_fetch_failed",
+          {
+            tgUserId,
+            mode,
+            dateRangePreset,
+          },
+          error
+        );
+        await ctx.reply(buildUserFacingError(error, mode));
+        return;
+      }
+
+      let buffer: Buffer;
+      try {
+        buffer = await generateRadarChartPng(buildChartSeries(radarData), config.defaultTimezone);
+      } catch (error) {
+        await logError("send_now_chart_failed", { tgUserId, dateRangePreset }, error);
+        await ctx.reply(buildUserFacingError(error, mode));
+        return;
+      }
+
+      const caption = `Cloudflare Radar 🇮🇷\n${formatTimestamp(config.defaultTimezone)}`;
+      try {
+        await sendChartToChat(privateChatId, caption, buffer);
+        if (shouldSendToTarget && selectedTarget) {
+          await sendChartToChat(selectedTarget.chatId, caption, buffer);
+        }
+        state.lastSendByUserId.set(tgUserId, Date.now());
+        state.lastRadarSourceByUserId.set(tgUserId, radarData.source);
+        await ctx.reply("چارت ارسال شد ✅");
+      } catch (error) {
+        await logError("send_now_send_failed", { tgUserId }, error);
+        await ctx.reply("ارسال چارت ناموفق بود. لطفاً دوباره امتحان کن.");
+      }
     } finally {
       state.inFlightByUserId.delete(tgUserId);
     }

@@ -222,13 +222,14 @@ const fetchFromSource = async (
     if (error instanceof RadarHttpError) {
       await logError("radar_fetch_failed", {
         status: error.status,
-        endpoint: error.path,
+        url: error.url,
+        path: error.path,
         params: error.params,
-        modeUsed: error.modeAttempted,
-        responseBody: error.responseBody,
+        modeUsed: error.modeUsed,
+        responseBody: error.responseBodyTrunc,
         dateRangePreset: config.dateRangePreset,
       });
-      throw mapRadarError(error.status, endpoint, normalizedParams, error.responseBody, error.modeAttempted);
+      throw mapRadarError(error.status, endpoint, normalizedParams, error.responseBodyTrunc, error.modeUsed);
     }
     await logError("radar_fetch_failed", {
       status: 0,
@@ -416,7 +417,7 @@ export const diagnoseRadar = async (
     return buildResult(result.meta.modeUsed, result.meta.status);
   } catch (error) {
     if (error instanceof RadarHttpError) {
-      return buildResult(error.modeAttempted, error.status, error.responseBody);
+      return buildResult(error.modeUsed, error.status, error.responseBodyTrunc);
     }
     return buildResult("public", 0, "Unknown error");
   }
