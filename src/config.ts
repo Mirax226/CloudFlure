@@ -10,6 +10,12 @@ type EnvConfig = {
   defaultTimezone: string;
   screenshotCooldownSec: number;
   maxSendsPerTick: number;
+  pm: {
+    enabled: boolean;
+    baseUrl: string | null;
+    token: string | null;
+    projectName: string;
+  };
   radar: {
     mode: RadarMode;
     apiToken: string | null;
@@ -64,6 +70,10 @@ export const loadConfig = (): EnvConfig => {
   const defaultTimezone = "Asia/Baku";
   const screenshotCooldownSec = parseNumberEnv("SCREENSHOT_COOLDOWN_SEC", 30);
   const maxSendsPerTick = parseNumberEnv("MAX_SENDS_PER_TICK", 20);
+  const pmBaseUrl = process.env.PM_BASE_URL ?? null;
+  const pmToken = process.env.PATH_APPLIER_TOKEN ?? null;
+  const pmProjectName = process.env.PM_PROJECT_NAME ?? "cloudflare-radar-bot";
+  const pmEnabled = Boolean(pmBaseUrl && pmToken && pmProjectName);
   const radarMode = parseRadarMode(process.env.RADAR_MODE);
   const radarApiToken = process.env.RADAR_API_TOKEN ?? null;
   const radarPublicBaseUrl = process.env.RADAR_PUBLIC_BASE_URL ?? "https://api.cloudflare.com/client/v4/radar";
@@ -78,6 +88,12 @@ export const loadConfig = (): EnvConfig => {
     defaultTimezone,
     screenshotCooldownSec,
     maxSendsPerTick,
+    pm: {
+      enabled: pmEnabled,
+      baseUrl: pmBaseUrl,
+      token: pmToken,
+      projectName: pmProjectName,
+    },
     radar: {
       mode: radarMode,
       apiToken: radarApiToken,

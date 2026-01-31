@@ -2,6 +2,8 @@ export type RadarEndpointName = "trafficCountries";
 
 export type RadarEndpointParams = {
   dateRange?: string;
+  since?: string;
+  until?: string;
   limit?: number;
   location?: string;
 };
@@ -29,7 +31,7 @@ const DATE_RANGE_ALIASES: Record<string, string> = {
   last_30_days: "30d",
 };
 
-const ALLOWED_DATE_RANGES = new Set(["1d", "7d", "30d", "90d"]);
+const ALLOWED_DATE_RANGES = new Set(["1d", "2d", "3d", "7d", "14d", "21d", "30d", "60d", "90d", "365d"]);
 
 export const DEFAULT_RADAR_ENDPOINT: RadarEndpointDefinition = {
   name: "trafficCountries",
@@ -54,6 +56,14 @@ const normalizeDateRange = (value: string): string => {
   return normalized;
 };
 
+const normalizeIsoDate = (value: string, field: "since" | "until"): string => {
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    throw new RadarConfigError(`Invalid ${field} value`);
+  }
+  return parsed.toISOString();
+};
+
 const normalizeLimit = (value: number): number => {
   if (!Number.isFinite(value)) {
     throw new RadarConfigError("Invalid limit value");
@@ -76,17 +86,26 @@ const normalizeLocation = (value: string): string => {
 export const buildEndpointParams = (
   params: RadarEndpointParams,
   endpoint: RadarEndpointDefinition = DEFAULT_RADAR_ENDPOINT
-): Required<Pick<RadarEndpointParams, "dateRange" | "limit">> & Partial<Pick<RadarEndpointParams, "location">> => {
-  const dateRange = params.dateRange ?? endpoint.defaults.dateRange;
-  if (!dateRange) {
-    throw new RadarConfigError("Missing required parameter: dateRange");
-  }
-
-  const normalized: Required<Pick<RadarEndpointParams, "dateRange" | "limit">> &
-    Partial<Pick<RadarEndpointParams, "location">> = {
-    dateRange: normalizeDateRange(dateRange),
+): Required<Pick<RadarEndpointParams, "limit">> &
+  Partial<Pick<RadarEndpointParams, "location" | "dateRange" | "since" | "until">> => {
+  const normalized: Required<Pick<RadarEndpointParams, "limit">> &
+    Partial<Pick<RadarEndpointParams, "location" | "dateRange" | "since" | "until">> = {
     limit: normalizeLimit(params.limit ?? endpoint.defaults.limit),
   };
+
+  if (params.since || params.until) {
+    if (!params.since || !params.until) {
+      throw new RadarConfigError("Both since and until must be provided");
+    }
+    normalized.since = normalizeIsoDate(params.since, "since");
+    normalized.until = normalizeIsoDate(params.until, "until");
+  } else {
+    const dateRange = params.dateRange ?? endpoint.defaults.dateRange;
+    if (!dateRange) {
+      throw new RadarConfigError("Missing required parameter: dateRange");
+    }
+    normalized.dateRange = normalizeDateRange(dateRange);
+  }
 
   if (params.location) {
     normalized.location = normalizeLocation(params.location);
