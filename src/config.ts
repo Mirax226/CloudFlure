@@ -68,9 +68,9 @@ export const loadConfig = (): EnvConfig => {
   const radarApiToken = process.env.RADAR_API_TOKEN ?? null;
   const radarPublicBaseUrl = process.env.RADAR_PUBLIC_BASE_URL ?? "https://api.cloudflare.com/client/v4/radar";
   const radarTokenBaseUrl = process.env.RADAR_TOKEN_BASE_URL ?? "https://api.cloudflare.com/client/v4/radar";
-  const radarHttpTimeoutMs = parseNumberEnv("RADAR_HTTP_TIMEOUT_MS", 45_000);
+  const radarHttpTimeoutMs = parseNumberEnv("RADAR_HTTP_TIMEOUT_MS", 15_000);
   const radarRetryMax = parseNumberEnv("RADAR_RETRY_MAX", 2);
-  const radarRetryBaseDelayMs = parseNumberEnv("RADAR_RETRY_BASE_DELAY_MS", 1500);
+  const radarRetryBaseDelayMs = parseNumberEnv("RADAR_RETRY_BASE_DELAY_MS", 500);
 
   return {
     botToken,

@@ -1,9 +1,8 @@
 import axios from "axios";
-import { type RadarTimeseriesPoint, validateRadarData } from "./fetch.js";
 
 const WIDTH = 1280;
 const HEIGHT = 720;
-const MAX_POINTS = 96;
+const MAX_POINTS = 20;
 
 export type ChartErrorCode = "CHART_RENDER_FAILED" | "CHART_INVALID_DATA";
 
@@ -19,6 +18,12 @@ export class ChartRenderError extends Error {
   }
 }
 
+export type RadarChartSeries = {
+  labels: string[];
+  values: number[];
+  title: string;
+};
+
 const formatTimestamp = (timezone: string): string => {
   const formatter = new Intl.DateTimeFormat("en-GB", {
     timeZone: timezone,
@@ -32,49 +37,35 @@ const formatTimestamp = (timezone: string): string => {
   return formatter.format(new Date()).replace(",", "");
 };
 
-const formatLabel = (timestamp: string, timezone: string): string => {
-  const formatter = new Intl.DateTimeFormat("en-GB", {
-    timeZone: timezone,
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-  });
-  return formatter.format(new Date(timestamp));
-};
-
-const downsample = (points: RadarTimeseriesPoint[], maxPoints: number): RadarTimeseriesPoint[] => {
-  if (points.length <= maxPoints) {
-    return points;
+const sliceSeries = (series: RadarChartSeries): RadarChartSeries => {
+  if (series.labels.length <= MAX_POINTS) {
+    return series;
   }
-  const step = Math.ceil(points.length / maxPoints);
-  return points.filter((_, index) => index % step === 0);
+  return {
+    ...series,
+    labels: series.labels.slice(0, MAX_POINTS),
+    values: series.values.slice(0, MAX_POINTS),
+  };
 };
 
-export const generateRadarChartPng = async (
-  points: RadarTimeseriesPoint[],
-  timezone: string
-): Promise<Buffer> => {
-  if (!validateRadarData(points)) {
+export const generateRadarChartPng = async (series: RadarChartSeries, timezone: string): Promise<Buffer> => {
+  if (!Array.isArray(series.labels) || series.labels.length === 0 || series.labels.length !== series.values.length) {
     throw new ChartRenderError("CHART_INVALID_DATA", "Radar data validation failed");
   }
 
-  const trimmedPoints = downsample(points, MAX_POINTS);
-  const labels = trimmedPoints.map((point) => formatLabel(point.timestamp, timezone));
-  const data = trimmedPoints.map((point) => point.value);
+  const trimmed = sliceSeries(series);
 
   const configuration = {
-    type: "line",
+    type: "bar",
     data: {
-      labels,
+      labels: trimmed.labels,
       datasets: [
         {
-          data,
-          label: "Traffic",
+          data: trimmed.values,
+          label: trimmed.title,
+          backgroundColor: "rgba(243, 128, 32, 0.6)",
           borderColor: "#f38020",
-          backgroundColor: "rgba(243, 128, 32, 0.2)",
-          fill: true,
-          tension: 0.3,
-          pointRadius: 0,
+          borderWidth: 1,
         },
       ],
     },
@@ -94,8 +85,7 @@ export const generateRadarChartPng = async (
           grid: { display: false },
           ticks: {
             maxRotation: 0,
-            autoSkip: true,
-            maxTicksLimit: 12,
+            autoSkip: false,
             color: "#374151",
           },
         },
@@ -117,7 +107,7 @@ export const generateRadarChartPng = async (
         height: HEIGHT,
         backgroundColor: "white",
       },
-      { responseType: "arraybuffer", timeout: 20_000 }
+      { responseType: "arraybuffer", timeout: 10_000 }
     );
 
     return Buffer.from(response.data);

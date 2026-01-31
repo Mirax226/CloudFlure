@@ -21,6 +21,7 @@ type BotContext = Context & { session: SessionData };
 type MenuDeps = {
   prisma: PrismaClient;
   sendNow: (ctx: Context) => Promise<void>;
+  runDiagnostics: (ctx: Context, userId?: number) => Promise<void>;
 };
 
 type ForwardedChat = {
@@ -117,6 +118,11 @@ const radarModeLabel = (mode: RadarMode | null): string => {
   }
 };
 
+const validateRadarToken = (token: string): boolean => {
+  const trimmed = token.trim();
+  return /^[A-Za-z0-9_\-.]{20,}$/.test(trimmed);
+};
+
 const showHelp = async (ctx: Context) => {
   await ctx.reply(
     [
@@ -146,10 +152,7 @@ const safeHandler = <T extends Context>(handler: (ctx: T) => Promise<void>) => {
   };
 };
 
-export const registerMenuHandlers = (
-  bot: Bot<BotContext>,
-  { prisma, sendNow }: MenuDeps
-) => {
+export const registerMenuHandlers = (bot: Bot<BotContext>, { prisma, sendNow, runDiagnostics }: MenuDeps) => {
   bot.command(
     "start",
     safeHandler(async (ctx: BotContext) => {
@@ -176,10 +179,9 @@ export const registerMenuHandlers = (
     safeHandler(async (ctx: BotContext) => {
       await ensureUser(ctx, prisma);
       ctx.session.step = "awaitingTargetForward";
-      await ctx.reply(
-        "بات رو به کانال/گروه اضافه کن و یک پیام از همونجا برام Forward کن 📩",
-        { reply_markup: buildMainKeyboard() }
-      );
+      await ctx.reply("بات رو به کانال/گروه اضافه کن و یک پیام از همونجا برام Forward کن 📩", {
+        reply_markup: buildMainKeyboard(),
+      });
     })
   );
 
@@ -266,10 +268,9 @@ export const registerMenuHandlers = (
         where: { id: target.id },
         data: { isEnabled: !target.isEnabled },
       });
-      await ctx.reply(
-        `وضعیت مقصد شد: ${updated.isEnabled ? "فعال ✅" : "غیرفعال ⛔"}`,
-        { reply_markup: buildMainKeyboard() }
-      );
+      await ctx.reply(`وضعیت مقصد شد: ${updated.isEnabled ? "فعال ✅" : "غیرفعال ⛔"}`, {
+        reply_markup: buildMainKeyboard(),
+      });
     })
   );
 
@@ -287,8 +288,11 @@ export const registerMenuHandlers = (
   bot.hears(
     labels.setRadarSource,
     safeHandler(async (ctx: BotContext) => {
-      await ensureUser(ctx, prisma);
-      const currentMode = await getRadarMode(prisma);
+      const user = await ensureUser(ctx, prisma);
+      if (!user) {
+        return;
+      }
+      const currentMode = await getRadarMode(prisma, user.id);
       ctx.session.step = "awaitingRadarMode";
       await ctx.reply(
         [
@@ -361,10 +365,9 @@ export const registerMenuHandlers = (
           },
         });
         ctx.session.step = null;
-        await ctx.reply(
-          `✅ مقصد اضافه شد: ${target.title ?? "بدون عنوان"} — هر 60 دقیقه`,
-          { reply_markup: buildMainKeyboard() }
-        );
+        await ctx.reply(`✅ مقصد اضافه شد: ${target.title ?? "بدون عنوان"} — هر 60 دقیقه`, {
+          reply_markup: buildMainKeyboard(),
+        });
         return;
       }
 
@@ -394,9 +397,11 @@ export const registerMenuHandlers = (
           data: { selectedTargetId: target.id },
         });
         ctx.session.step = null;
-        await ctx.reply(`🎯 مقصد انتخاب شد: ${target.title ?? "بدون عنوان"}`, {
-          reply_markup: buildMainKeyboard(),
-        });
+        await ctx.reply(`🎯 مقصد انتخاب شد: ${target.title ?? "بدون عنوان"}`,
+          {
+            reply_markup: buildMainKeyboard(),
+          }
+        );
         return;
       }
 
@@ -427,11 +432,18 @@ export const registerMenuHandlers = (
       }
 
       if (ctx.session.step === "awaitingRadarToken") {
-        await setRadarApiToken(prisma, text);
+        if (!validateRadarToken(text)) {
+          await ctx.reply("فرمت توکن معتبر نیست. یک توکن صحیح ارسال کن.", {
+            reply_markup: buildMainKeyboard(),
+          });
+          return;
+        }
+        await setRadarApiToken(prisma, text, user.id);
         ctx.session.step = null;
-        await ctx.reply("توکن Radar API ذخیره شد ✅", {
+        await ctx.reply("توکن Radar API ذخیره شد، در حال تست...", {
           reply_markup: buildMainKeyboard(),
         });
+        await runDiagnostics(ctx, user.id);
         return;
       }
 
@@ -443,7 +455,7 @@ export const registerMenuHandlers = (
           });
           return;
         }
-        await setRadarMode(prisma, mode);
+        await setRadarMode(prisma, mode, user.id);
         ctx.session.step = null;
         await ctx.reply(`منبع دیتا شد: ${radarModeLabel(mode)} ✅`, {
           reply_markup: buildMainKeyboard(),

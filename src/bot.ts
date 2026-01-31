@@ -5,19 +5,21 @@ import type { EnvConfig } from "./config.js";
 import { generateRadarChartPng, ChartRenderError } from "./radar/generate.js";
 import {
   fetchRadarData,
+  diagnoseRadar,
   RadarFetchError,
   type RadarFetchConfig,
   type RadarMode,
-  type RadarTimeseriesPoint,
-  testPublicRadarEndpoint,
-  testTokenRadarEndpoint,
+  type RadarChartData,
+  type RadarDiagnostics,
 } from "./radar/fetch.js";
+import { RadarConfigError } from "./radar/endpoints.js";
 import { registerMenuHandlers, type SessionData } from "./ui/menus.js";
 import { logError, logInfo } from "./logger.js";
 import { getRadarSettings } from "./db/settings.js";
 
 export type BotState = {
   lastSendByUserId: Map<number, number>;
+  lastRadarSourceByUserId: Map<number, "public" | "token">;
 };
 
 const formatTimestamp = (timezone: string): string => {
@@ -35,9 +37,10 @@ const formatTimestamp = (timezone: string): string => {
 
 const resolveRadarFetchConfig = async (
   prisma: PrismaClient,
-  config: EnvConfig
+  config: EnvConfig,
+  userId?: number
 ): Promise<{ fetchConfig: RadarFetchConfig; mode: RadarMode; token: string | null }> => {
-  const settings = await getRadarSettings(prisma);
+  const settings = await getRadarSettings(prisma, userId);
   const mode = settings.radarMode ?? config.radar.mode;
   const token = settings.radarApiToken ?? config.radar.apiToken;
   return {
@@ -55,21 +58,32 @@ const resolveRadarFetchConfig = async (
   };
 };
 
-const buildUserFacingError = (error: unknown): string => {
+const buildUserFacingError = (error: unknown, mode?: RadarMode): string => {
+  if (error instanceof RadarConfigError) {
+    return "خطای تنظیمات درخواست (400). نیاز به اصلاح فنی.";
+  }
+
   if (error instanceof RadarFetchError) {
     switch (error.code) {
+      case "RADAR_PUBLIC_UNSUPPORTED":
+        return "Public برای این چارت فعال نیست. حالت Token رو انتخاب کن.";
+      case "RADAR_TOKEN_MISSING":
+        return "توکن Radar API تنظیم نشده. از منوی 🗝️ توکن رو ثبت کن.";
       case "RADAR_UNAUTHORIZED":
-        return "توکن معتبر نیست یا دسترسی نداره. توکن رو دوباره تنظیم کن.";
+        if (mode === "public") {
+          return "Public برای این چارت فعال نیست. حالت Token رو انتخاب کن.";
+        }
+        return "توکن نامعتبره یا دسترسی Radar کافی نیست.";
       case "RADAR_BAD_REQUEST":
-        return "خطای تنظیمات درخواست (400). این مورد نیاز به اصلاح فنی داره.";
+        return "خطای تنظیمات درخواست (400). نیاز به اصلاح فنی.";
       case "RADAR_RATE_LIMIT":
-        return "فعلاً درخواست‌ها زیاد شده. چند دقیقه دیگه دوباره امتحان کن.";
+        return "محدودیت نرخ؛ چند دقیقه دیگر تلاش می‌کنم.";
       case "RADAR_TIMEOUT":
-        return "سرور دیر جواب داد. دوباره امتحان کن.";
       case "RADAR_UPSTREAM":
       case "RADAR_NETWORK":
-        return "مشکل در دریافت دیتا از Radar. دوباره امتحان کن.";
+        return "مشکل ارتباط/سرویس؛ بعداً دوباره تلاش می‌کنم.";
       case "RADAR_INVALID_DATA":
+      case "RADAR_EMPTY_DATA":
         return "دیتای معتبر دریافت نشد. دوباره امتحان کن.";
       default:
         return "دریافت دیتا ناموفق بود. دوباره تلاش کن.";
@@ -84,6 +98,24 @@ const buildUserFacingError = (error: unknown): string => {
   }
 
   return "یک خطای غیرمنتظره رخ داد. دوباره تلاش کن.";
+};
+
+const formatRadarDiagnostics = (diagnostics: RadarDiagnostics, lastSource?: "public" | "token") => {
+  const lines = [
+    `حالت تنظیم‌شده: ${diagnostics.configuredMode}`,
+    `منبع مؤثر: ${diagnostics.effectiveSource ?? "نامشخص"}`,
+    lastSource ? `آخرین منبع موفق: ${lastSource}` : "آخرین منبع موفق: نامشخص",
+    `مسیر API: ${diagnostics.endpoint}`,
+    `پارامترها: ${JSON.stringify(diagnostics.params)}`,
+    `کد وضعیت: ${diagnostics.status ?? "نامشخص"}`,
+    `زمان پاسخ: ${diagnostics.timingMs ?? "نامشخص"}ms`,
+    `خطای کوتاه: ${diagnostics.errorSummary ?? "ندارد"}`,
+  ];
+  return lines.join("\n");
+};
+
+const buildChartSeries = (data: RadarChartData): { labels: string[]; values: number[]; title: string } => {
+  return { labels: data.labels, values: data.values, title: data.label };
 };
 
 export const createBot = (prisma: PrismaClient, config: EnvConfig, state: BotState) => {
@@ -105,6 +137,13 @@ export const createBot = (prisma: PrismaClient, config: EnvConfig, state: BotSta
   const sendChartToChat = async (chatId: bigint | number, caption: string, buffer: Buffer) => {
     const photo = new InputFile(buffer, "radar.png");
     await bot.api.sendPhoto(Number(chatId), photo, { caption });
+  };
+
+  const runDiagnostics = async (ctx: Context, userId?: number) => {
+    const { fetchConfig } = await resolveRadarFetchConfig(prisma, config, userId);
+    const diagnostics = await diagnoseRadar({ dateRange: "7d", limit: 10 }, fetchConfig);
+    const lastSource = userId ? state.lastRadarSourceByUserId.get(userId) : undefined;
+    await ctx.reply(formatRadarDiagnostics(diagnostics, lastSource));
   };
 
   const sendNow = async (ctx: Context) => {
@@ -137,7 +176,7 @@ export const createBot = (prisma: PrismaClient, config: EnvConfig, state: BotSta
       : null;
     const shouldSendToTarget = Boolean(selectedTarget?.isEnabled);
 
-    const { fetchConfig, mode, token } = await resolveRadarFetchConfig(prisma, config);
+    const { fetchConfig, mode, token } = await resolveRadarFetchConfig(prisma, config, user.id);
     if (mode === "token" && !token) {
       await ctx.reply("توکن Radar API تنظیم نشده. از منوی 🗝️ توکن رو ثبت کن.");
       return;
@@ -145,22 +184,21 @@ export const createBot = (prisma: PrismaClient, config: EnvConfig, state: BotSta
 
     await ctx.reply("⏳ در حال آماده‌سازی چارت…");
 
-    let points: RadarTimeseriesPoint[];
+    let radarData: RadarChartData;
     try {
-      const radarData = await fetchRadarData({ dateRange: "1d", location: "IR" }, fetchConfig);
-      points = radarData.points;
+      radarData = await fetchRadarData({ dateRange: "7d", limit: 10 }, fetchConfig);
     } catch (error) {
       await logError("send_now_radar_fetch_failed", { tgUserId, mode, error });
-      await ctx.reply(buildUserFacingError(error));
+      await ctx.reply(buildUserFacingError(error, mode));
       return;
     }
 
     let buffer: Buffer;
     try {
-      buffer = await generateRadarChartPng(points, config.defaultTimezone);
+      buffer = await generateRadarChartPng(buildChartSeries(radarData), config.defaultTimezone);
     } catch (error) {
       await logError("send_now_chart_failed", { tgUserId, error });
-      await ctx.reply(buildUserFacingError(error));
+      await ctx.reply(buildUserFacingError(error, mode));
       return;
     }
 
@@ -171,6 +209,7 @@ export const createBot = (prisma: PrismaClient, config: EnvConfig, state: BotSta
         await sendChartToChat(selectedTarget.chatId, caption, buffer);
       }
       state.lastSendByUserId.set(tgUserId, Date.now());
+      state.lastRadarSourceByUserId.set(tgUserId, radarData.source);
       await ctx.reply("چارت ارسال شد ✅");
     } catch (error) {
       await logError("send_now_send_failed", { tgUserId, error });
@@ -178,29 +217,53 @@ export const createBot = (prisma: PrismaClient, config: EnvConfig, state: BotSta
     }
   };
 
-  bot.command("radar_test", async (ctx: Context) => {
+  bot.command("diag_radar", async (ctx: Context) => {
     try {
-      const { fetchConfig, token } = await resolveRadarFetchConfig(prisma, config);
-      const publicResult = await testPublicRadarEndpoint({ ...fetchConfig, mode: "public" });
-      const tokenResult = token
-        ? await testTokenRadarEndpoint({ ...fetchConfig, mode: "token", token })
+      const tgUserId = ctx.from?.id ?? null;
+      const user = tgUserId
+        ? await prisma.user.findUnique({ where: { tgUserId: BigInt(tgUserId) } })
         : null;
+      await runDiagnostics(ctx, user?.id);
+    } catch (error) {
+      await logError("radar_diag_failed", { error });
+      await ctx.reply("اجرای تشخیص Radar ناموفق بود. دوباره تلاش کن.");
+    }
+  });
+
+  bot.command("diag_scheduler", async (ctx: Context) => {
+    try {
+      const schedules = await prisma.targetSchedule.findMany({
+        where: { targetChat: { isEnabled: true } },
+        include: { targetChat: true },
+        orderBy: { updatedAt: "asc" },
+      });
+
+      if (!schedules.length) {
+        await ctx.reply("هیچ مقصد فعالی ثبت نشده است.");
+        return;
+      }
 
       const lines = [
-        `Public: ${publicResult.ok ? "✅" : `❌ (${publicResult.error ?? "error"})`}`,
-        tokenResult
-          ? `Token: ${tokenResult.ok ? "✅" : `❌ (${tokenResult.error ?? "error"})`}`
-          : "Token: تنظیم نشده",
+        `تعداد مقصدهای فعال: ${schedules.length}`,
+        ...schedules.map((schedule) =>
+          [
+            `- ${schedule.targetChat.title ?? "بدون عنوان"}`,
+            `intervalMinutes=${schedule.intervalMinutes}`,
+            `lastSentAt=${schedule.lastSentAt?.toISOString() ?? "-"}`,
+            `nextRetryAt=${schedule.nextRetryAt?.toISOString() ?? "-"}`,
+            `failCount=${schedule.failCount ?? 0}`,
+          ].join(" ")
+        ),
       ];
 
       await ctx.reply(lines.join("\n"));
     } catch (error) {
-      await logError("radar_test_failed", { error });
-      await ctx.reply("اجرای تست Radar ناموفق بود. دوباره تلاش کن.");
+      await logError("diag_scheduler_failed", { error });
+      await ctx.reply("اجرای تشخیص Scheduler ناموفق بود. دوباره تلاش کن.");
     }
   });
 
-  registerMenuHandlers(bot, { prisma, sendNow });
+  registerMenuHandlers(bot, { prisma, sendNow, runDiagnostics });
 
   void logInfo("bot_initialized", { hasPublicUrl: Boolean(config.publicUrl) });
 

@@ -2,14 +2,17 @@ import type { PrismaClient } from "@prisma/client";
 import { SendStatus } from "@prisma/client";
 import type { EnvConfig } from "../config.js";
 import { generateRadarChartPng } from "../radar/generate.js";
-import { fetchRadarData, RadarFetchError, type RadarFetchConfig } from "../radar/fetch.js";
+import {
+  fetchRadarData,
+  RadarFetchError,
+  type RadarFetchConfig,
+  type RadarChartData,
+} from "../radar/fetch.js";
 import { logError } from "../logger.js";
 import { getRadarSettings } from "../db/settings.js";
+import { getSchedulerBackoffMinutes } from "./backoff.js";
 
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-const BASE_RETRY_MINUTES = 10;
-const MAX_RETRY_MINUTES = 60;
-const MAX_SCHEDULE_RETRIES = 2;
 const FAILURE_NOTIFY_COOLDOWN_MINUTES = 30;
 const IN_PROGRESS_LOCK_MINUTES = 10;
 
@@ -34,10 +37,6 @@ const formatTimestamp = (timezone: string): string => {
   return formatter.format(new Date()).replace(",", "");
 };
 
-const getRetryDelayMinutes = (attempt: number): number => {
-  return Math.min(BASE_RETRY_MINUTES * attempt, MAX_RETRY_MINUTES);
-};
-
 const buildRadarFetchConfig = (
   config: EnvConfig,
   token: string | null,
@@ -54,21 +53,29 @@ const buildRadarFetchConfig = (
   };
 };
 
-const updateScheduleRetry = async (
+const updateScheduleFailure = async (
   prisma: PrismaClient,
   scheduleId: number,
-  retryCount: number,
-  nowMs: number
+  currentFailCount: number,
+  now: Date
 ) => {
-  const nextRetryMinutes = getRetryDelayMinutes(Math.min(retryCount + 1, MAX_SCHEDULE_RETRIES));
-  const nextRetryAt = new Date(nowMs + nextRetryMinutes * 60 * 1000);
+  const nextFailCount = currentFailCount + 1;
+  const backoffMinutes = getSchedulerBackoffMinutes(nextFailCount);
+  const nextRetryAt = new Date(now.getTime() + backoffMinutes * 60 * 1000);
   await prisma.targetSchedule.update({
     where: { id: scheduleId },
     data: {
+      failCount: nextFailCount,
       nextRetryAt,
-      retryCount: Math.min(retryCount + 1, MAX_SCHEDULE_RETRIES),
       inProgressUntil: null,
     },
+  });
+};
+
+const updateScheduleSuccess = async (prisma: PrismaClient, scheduleId: number, sentAt: Date) => {
+  await prisma.targetSchedule.update({
+    where: { id: scheduleId },
+    data: { lastSentAt: sentAt, nextRetryAt: null, failCount: 0, inProgressUntil: null },
   });
 };
 
@@ -92,6 +99,20 @@ const updateTargetSuccess = async (prisma: PrismaClient, targetChatId: number, n
       notifyCooldownUntil: null,
     },
   });
+};
+
+const buildChartBuffer = async (
+  config: EnvConfig,
+  token: string | null,
+  mode: RadarFetchConfig["mode"]
+): Promise<{ buffer: Buffer; radarData: RadarChartData }> => {
+  const radarConfig = buildRadarFetchConfig(config, token, mode);
+  const radarData = await fetchRadarData({ dateRange: "7d", limit: 10 }, radarConfig);
+  const buffer = await generateRadarChartPng(
+    { labels: radarData.labels, values: radarData.values, title: radarData.label },
+    config.defaultTimezone
+  );
+  return { buffer, radarData };
 };
 
 export const runSchedulerTick = async (
@@ -157,22 +178,36 @@ export const runSchedulerTick = async (
     }
 
     let buffer: Buffer;
+    let radarData: RadarChartData;
     try {
-      const radarConfig = buildRadarFetchConfig(config, token, mode);
-      const radarData = await fetchRadarData({ dateRange: "1d", location: "IR" }, radarConfig);
-      buffer = await generateRadarChartPng(radarData.points, config.defaultTimezone);
+      const result = await buildChartBuffer(config, token, mode);
+      buffer = result.buffer;
+      radarData = result.radarData;
     } catch (error) {
       const errorCode = error instanceof RadarFetchError ? error.code : "CHART_RENDER_FAILED";
+      const errorSummary =
+        error instanceof RadarFetchError
+          ? [error.code, error.status, error.errors?.[0]?.message].filter(Boolean).join(":")
+          : "CHART_RENDER_FAILED";
       await logError("scheduler_capture_failed", { scope: "scheduler_capture_failed", errorCode, error });
-      const retryUpdates = pendingSchedules.map((schedule) =>
-        updateScheduleRetry(prisma, schedule.id, schedule.retryCount ?? 0, nowMs)
+      const failureUpdates = pendingSchedules.map((schedule) =>
+        updateScheduleFailure(prisma, schedule.id, schedule.failCount ?? 0, now)
       );
-      const targetUpdates = pendingSchedules.map((schedule) =>
-        updateTargetFailure(prisma, schedule.targetChatId, now)
+      const targetUpdates = pendingSchedules.map((schedule) => updateTargetFailure(prisma, schedule.targetChatId, now));
+      const sendLogs = pendingSchedules.map((schedule) =>
+        prisma.sendLog.create({
+          data: {
+            targetChatId: schedule.targetChatId,
+            sentAt: now,
+            status: SendStatus.FAIL,
+            error: errorSummary,
+          },
+        })
       );
-      await Promise.all([...retryUpdates, ...targetUpdates]);
+      await Promise.all([...failureUpdates, ...targetUpdates, ...sendLogs]);
       return;
     }
+
     const caption = `Cloudflare Radar 🇮🇷\n${formatTimestamp(config.defaultTimezone)}`;
 
     for (const schedule of pendingSchedules) {
@@ -184,10 +219,7 @@ export const runSchedulerTick = async (
       });
       try {
         await sender.sendChartToChat(schedule.targetChat.chatId, caption, buffer);
-        await prisma.targetSchedule.update({
-          where: { id: schedule.id },
-          data: { lastSentAt: sentAt, nextRetryAt: null, retryCount: 0, inProgressUntil: null },
-        });
+        await updateScheduleSuccess(prisma, schedule.id, sentAt);
         await updateTargetSuccess(prisma, schedule.targetChatId, sentAt);
         await prisma.sendLog.create({
           data: {
@@ -200,7 +232,7 @@ export const runSchedulerTick = async (
         await delay(200);
       } catch (error) {
         await logError("scheduler_send_failed", { scope: "scheduler_send_failed", error });
-        await updateScheduleRetry(prisma, schedule.id, schedule.retryCount ?? 0, sentAt.getTime());
+        await updateScheduleFailure(prisma, schedule.id, schedule.failCount ?? 0, sentAt);
         await updateTargetFailure(prisma, schedule.targetChatId, sentAt);
         await prisma.sendLog.create({
           data: {
@@ -212,6 +244,11 @@ export const runSchedulerTick = async (
         });
       }
     }
+
+    console.log("scheduler_tick_completed", {
+      source: radarData.source,
+      endpoint: radarData.endpoint,
+    });
   } finally {
     state.isTickRunning = false;
   }
