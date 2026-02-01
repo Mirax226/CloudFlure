@@ -15,11 +15,6 @@ const formatBody = (data: unknown): string => {
   }
 };
 
-const resolveBaseUrl = (mode: "public" | "token"): string | undefined => {
-  const envKey = mode === "public" ? "RADAR_PUBLIC_BASE_URL" : "RADAR_TOKEN_BASE_URL";
-  return process.env[envKey]?.trim() || undefined;
-};
-
 const isRouteInvalid = (body: string): boolean => {
   if (body.includes("No route for that URI")) {
     return true;
@@ -40,8 +35,7 @@ const run = async (label: string, token?: string) => {
     headers.Authorization = `Bearer ${token}`;
   }
 
-  const baseUrl = resolveBaseUrl(token ? "token" : "public");
-  const url = buildRadarUrl(DEFAULT_RADAR_ENDPOINT.path, params, baseUrl);
+  const url = buildRadarUrl(DEFAULT_RADAR_ENDPOINT.path, params);
   const response = await axios.get(url, {
     headers,
     validateStatus: () => true,
