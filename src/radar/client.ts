@@ -3,7 +3,7 @@ import { logInfo, logWarn } from "../logger.js";
 
 export const CF_ORIGIN = "https://api.cloudflare.com";
 export const CF_API_BASE = `${CF_ORIGIN}/client/v4`;
-export const RADAR_BASE = `${CF_API_BASE}/radar`;
+export const RADAR_BASE_URL = `${CF_API_BASE}/radar`;
 
 export type RadarAuthMode = "public" | "token" | "auto";
 
@@ -45,20 +45,25 @@ export class RadarHttpError extends Error {
   }
 }
 
+export class RadarRouteInvalidError extends Error {
+  url: string;
+  endpoint: string;
+  params: Record<string, RadarQueryParamValue>;
+
+  constructor(message: string, details: { url: string; endpoint: string; params: Record<string, RadarQueryParamValue> }) {
+    super(message);
+    this.name = "RadarRouteInvalidError";
+    this.url = details.url;
+    this.endpoint = details.endpoint;
+    this.params = details.params;
+  }
+}
+
 const USER_AGENT = "CloudFlureBot/2.0";
 const RESPONSE_BODY_LIMIT = 2000;
 const DEFAULT_TIMEOUT_MS = 15_000;
 
 const truncate = (value: string, maxChars: number) => (value.length > maxChars ? `${value.slice(0, maxChars)}…` : value);
-
-const resolveRadarBaseUrl = (mode: "public" | "token"): string => {
-  const envKey = mode === "public" ? "RADAR_PUBLIC_BASE_URL" : "RADAR_TOKEN_BASE_URL";
-  const raw = process.env[envKey]?.trim();
-  if (raw) {
-    return raw.replace(/\/$/, "");
-  }
-  return RADAR_BASE;
-};
 
 const looksLikeRouteInvalid = (responseBody: string): boolean => {
   if (!responseBody) {
@@ -68,23 +73,24 @@ const looksLikeRouteInvalid = (responseBody: string): boolean => {
     return true;
   }
   try {
-    const parsed = JSON.parse(responseBody) as { errors?: { message?: string }[] };
-    return parsed?.errors?.some((item) => item?.message?.includes("No route for that URI")) ?? false;
+    const parsed = JSON.parse(responseBody) as { errors?: { message?: string; code?: number | string }[] };
+    return (
+      parsed?.errors?.some(
+        (item) => item?.message?.includes("No route for that URI") || Number(item?.code) === 7000
+      ) ?? false
+    );
   } catch {
-    return false;
+    return responseBody.includes("7000");
   }
 };
 
 export const buildRadarUrl = (
-  path: string,
-  params: Record<string, RadarQueryParamValue>,
-  baseUrl: string = RADAR_BASE
+  endpoint: string,
+  params: Record<string, RadarQueryParamValue>
 ): string => {
-  const normalizedPath = path.startsWith("/") ? path : `/${path}`;
-  if (!baseUrl.includes("/client/v4/radar")) {
-    throw new Error("Radar base misconfigured");
-  }
-  const url = new URL(normalizedPath.slice(1), `${baseUrl.replace(/\/$/, "")}/`);
+  const normalizedEndpoint = endpoint.startsWith("/") ? endpoint : `/${endpoint}`;
+  const baseUrl = RADAR_BASE_URL.replace(/\/$/, "");
+  const url = new URL(`${baseUrl}${normalizedEndpoint}`);
   Object.entries(params).forEach(([key, value]) => {
     if (value === undefined || value === null) {
       return;
@@ -97,7 +103,15 @@ export const buildRadarUrl = (
     }
     url.searchParams.set(key, String(value));
   });
-  return url.toString();
+  const finalUrl = url.toString();
+  if (!finalUrl.includes("/client/v4/radar/")) {
+    throw new RadarRouteInvalidError("مسیر API اشتباه است (RADAR_ROUTE_INVALID). در حال اصلاح.", {
+      url: finalUrl,
+      endpoint: normalizedEndpoint,
+      params,
+    });
+  }
+  return finalUrl;
 };
 
 export const isRadarTokenValidFormat = (token?: string | null): boolean => {
@@ -114,8 +128,7 @@ const executeRequest = async <T>(
   token: string | undefined,
   timeoutMs: number
 ): Promise<{ data: T; meta: RadarRequestMeta }> => {
-  const baseUrl = resolveRadarBaseUrl(modeUsed);
-  const url = buildRadarUrl(path, params, baseUrl);
+  const url = buildRadarUrl(path, params);
   const headers: Record<string, string> = {
     Accept: "application/json",
     "User-Agent": USER_AGENT,
@@ -133,13 +146,25 @@ const executeRequest = async <T>(
   if (status < 200 || status >= 300) {
     const responseBody =
       typeof response.data === "string" ? response.data : JSON.stringify(response.data ?? "");
+    const responseBodyTrunc = truncate(responseBody, RESPONSE_BODY_LIMIT);
+    const routeInvalid = looksLikeRouteInvalid(responseBody);
+    await logWarn("radar_request_non_2xx", {
+      finalUrl: url,
+      endpoint: path,
+      params,
+      status,
+      authMode: modeUsed,
+      responseBody: responseBodyTrunc,
+      classification: routeInvalid ? "RADAR_ROUTE_INVALID" : "RADAR_HTTP_ERROR",
+      userMessage: routeInvalid ? "مسیر API اشتباه است (RADAR_ROUTE_INVALID). در حال اصلاح." : undefined,
+    });
     throw new RadarHttpError("Radar API responded with non-2xx status", {
       status,
       url,
       path,
       params,
       modeUsed,
-      responseBodyTrunc: truncate(responseBody, RESPONSE_BODY_LIMIT),
+      responseBodyTrunc,
     });
   }
   return { data: response.data as T, meta: { url, status, modeUsed } };
