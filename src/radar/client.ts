@@ -7,6 +7,8 @@ export const RADAR_BASE = `${CF_API_BASE}/radar`;
 
 export type RadarAuthMode = "public" | "token" | "auto";
 
+export type RadarQueryParamValue = string | number | boolean | Array<string | number> | undefined;
+
 export type RadarRequestMeta = {
   url: string;
   status: number;
@@ -27,7 +29,7 @@ export class RadarHttpError extends Error {
   status: number;
   url: string;
   path: string;
-  params: Record<string, string | number | boolean | undefined>;
+  params: Record<string, RadarQueryParamValue>;
   modeUsed: "public" | "token";
   responseBodyTrunc: string;
 
@@ -49,19 +51,48 @@ const DEFAULT_TIMEOUT_MS = 15_000;
 
 const truncate = (value: string, maxChars: number) => (value.length > maxChars ? `${value.slice(0, maxChars)}…` : value);
 
+const resolveRadarBaseUrl = (mode: "public" | "token"): string => {
+  const envKey = mode === "public" ? "RADAR_PUBLIC_BASE_URL" : "RADAR_TOKEN_BASE_URL";
+  const raw = process.env[envKey]?.trim();
+  if (raw) {
+    return raw.replace(/\/$/, "");
+  }
+  return RADAR_BASE;
+};
+
+const looksLikeRouteInvalid = (responseBody: string): boolean => {
+  if (!responseBody) {
+    return false;
+  }
+  if (responseBody.includes("No route for that URI")) {
+    return true;
+  }
+  try {
+    const parsed = JSON.parse(responseBody) as { errors?: { message?: string }[] };
+    return parsed?.errors?.some((item) => item?.message?.includes("No route for that URI")) ?? false;
+  } catch {
+    return false;
+  }
+};
+
 export const buildRadarUrl = (
   path: string,
-  params: Record<string, string | number | boolean | undefined>
+  params: Record<string, RadarQueryParamValue>,
+  baseUrl: string = RADAR_BASE
 ): string => {
-  if (!path.startsWith("/")) {
-    throw new Error("Radar path must start with '/'");
-  }
-  if (!RADAR_BASE.includes("/client/v4/radar")) {
+  const normalizedPath = path.startsWith("/") ? path : `/${path}`;
+  if (!baseUrl.includes("/client/v4/radar")) {
     throw new Error("Radar base misconfigured");
   }
-  const url = new URL(path.slice(1), `${RADAR_BASE}/`);
+  const url = new URL(normalizedPath.slice(1), `${baseUrl.replace(/\/$/, "")}/`);
   Object.entries(params).forEach(([key, value]) => {
     if (value === undefined || value === null) {
+      return;
+    }
+    if (Array.isArray(value)) {
+      value.forEach((entry) => {
+        url.searchParams.append(key, String(entry));
+      });
       return;
     }
     url.searchParams.set(key, String(value));
@@ -78,12 +109,13 @@ export const isRadarTokenValidFormat = (token?: string | null): boolean => {
 
 const executeRequest = async <T>(
   path: string,
-  params: Record<string, string | number | boolean | undefined>,
+  params: Record<string, RadarQueryParamValue>,
   modeUsed: "public" | "token",
   token: string | undefined,
   timeoutMs: number
 ): Promise<{ data: T; meta: RadarRequestMeta }> => {
-  const url = buildRadarUrl(path, params);
+  const baseUrl = resolveRadarBaseUrl(modeUsed);
+  const url = buildRadarUrl(path, params, baseUrl);
   const headers: Record<string, string> = {
     Accept: "application/json",
     "User-Agent": USER_AGENT,
@@ -113,11 +145,11 @@ const executeRequest = async <T>(
   return { data: response.data as T, meta: { url, status, modeUsed } };
 };
 
-const isFallbackStatus = (status: number): boolean => [400, 401, 403, 404].includes(status);
+const isFallbackStatus = (status: number): boolean => status >= 400 && status < 500;
 
 export const requestRadar = async <T>(
   path: string,
-  params: Record<string, string | number | boolean | undefined>,
+  params: Record<string, RadarQueryParamValue>,
   mode: RadarAuthMode,
   token?: string,
   options?: { timeoutMs?: number }
@@ -140,6 +172,9 @@ export const requestRadar = async <T>(
       return await executeRequest<T>(path, params, "token", tokenValue, timeoutMs);
     } catch (error) {
       if (error instanceof RadarHttpError && isFallbackStatus(error.status)) {
+        if (looksLikeRouteInvalid(error.responseBodyTrunc)) {
+          throw error;
+        }
         await logWarn("radar_auto_token_fallback_public", {
           status: error.status,
           endpoint: path,
@@ -191,7 +226,7 @@ export const probeRadarPublicEndpoint = async (): Promise<PublicContract> => {
     return cachedPublicContract;
   }
 
-  const basePath = "/traffic/countries";
+  const basePath = "/http/top/locations/http_protocol/HTTPS";
   const candidates: Array<{
     path: string;
     paramMode: "dateRange" | "sinceUntil";

@@ -32,16 +32,26 @@ DATABASE_URL=postgresql://...
 متغیرهای اختیاری:
 ```
 PUBLIC_URL=https://your-service.onrender.com
+SCREENSHOT_COOLDOWN_SEC=30
+MAX_SENDS_PER_TICK=20
+```
+
+اختیاری (PM):
+```
+PM_ENDPOINT=https://your-pm-host/api/logs
+PM_BEARER_TOKEN=...
+PM_PROJECT=cloudflare-bot
+```
+
+اختیاری (Radar):
+```
 RADAR_MODE=auto           # public | token | auto
 RADAR_API_TOKEN=...
+RADAR_PUBLIC_BASE_URL=https://api.cloudflare.com/client/v4/radar
+RADAR_TOKEN_BASE_URL=https://api.cloudflare.com/client/v4/radar
 RADAR_HTTP_TIMEOUT_MS=45000
 RADAR_RETRY_MAX=2
 RADAR_RETRY_BASE_DELAY_MS=1500
-SCREENSHOT_COOLDOWN_SEC=30
-MAX_SENDS_PER_TICK=20
-PM_BASE_URL=https://your-pm-host
-PATH_APPLIER_TOKEN=...
-PM_PROJECT_NAME=cloudflare-radar-bot
 ```
 
 توکن Radar API را داخل منوی ربات تنظیم کنید (یا از `RADAR_API_TOKEN`).
@@ -63,7 +73,7 @@ npm run dev
 ${PUBLIC_URL}/telegram
 ```
 
-اگر `PUBLIC_URL` ست نشود، بات به حالت long polling می‌رود.
+اگر `PUBLIC_URL` ست نشود، بات به حالت long polling می‌رود (بدون کرش).
 
 ## Radar mode
 - `public`: فقط endpoint عمومی (بدون توکن)
@@ -98,7 +108,7 @@ npx ts-node-dev --transpile-only scripts/test-radar.ts
    ```bash
    BOT_TOKEN=...
    DATABASE_URL=postgresql://...
-   PUBLIC_URL=https://your-service.onrender.com
+   PUBLIC_URL=https://your-service.onrender.com  # optional
    RADAR_MODE=auto
    RADAR_API_TOKEN=...
    ```

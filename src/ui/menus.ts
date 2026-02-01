@@ -122,9 +122,9 @@ const radarModeLabel = (mode: RadarMode | null): string => {
 };
 
 const RADAR_DATE_RANGE_OPTIONS: Array<{ preset: RadarDateRangePreset; label: string }> = [
-  { preset: "D1", label: "1 روزه" },
-  { preset: "D2", label: "2 روزه" },
-  { preset: "D3", label: "3 روزه" },
+  { preset: "D1", label: "1 روز" },
+  { preset: "D2", label: "2 روز" },
+  { preset: "D3", label: "3 روز" },
   { preset: "D7", label: "1 هفته" },
   { preset: "D14", label: "2 هفته" },
   { preset: "D21", label: "3 هفته" },

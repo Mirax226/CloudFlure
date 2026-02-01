@@ -13,11 +13,11 @@ console.log("Config loaded", {
   radarMode: config.radar.mode,
 });
 void logInfo("radar_client_ready", {
-  exampleUrl: buildRadarUrl("/traffic/countries", { limit: 10, dateRange: "7d" }),
+  exampleUrl: buildRadarUrl("/http/top/locations/http_protocol/HTTPS", { limit: 10, dateRange: "7d" }),
 });
 if (!config.pm.enabled) {
   void logWarn("pm_disabled", {
-    reason: !config.pm.baseUrl ? "PM_BASE_URL missing" : "PATH_APPLIER_TOKEN missing",
+    reason: !config.pm.endpoint ? "PM_ENDPOINT missing" : "PM_BEARER_TOKEN missing",
   });
 }
 
@@ -84,7 +84,10 @@ const start = async () => {
     await bot.api.setWebhook(webhookUrl);
     console.log(`Webhook set to ${webhookUrl}`);
   } else {
-    await logWarn("missing_env_PUBLIC_URL", { hint: "Set Render service URL for webhook or deep links" });
+    await logWarn("missing_env_PUBLIC_URL", {
+      hint: "Set Render service URL for webhook or deep links",
+      envKeysPresent: Object.keys(process.env),
+    });
     void bot.start();
   }
 
