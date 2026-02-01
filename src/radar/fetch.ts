@@ -1,5 +1,5 @@
 import { logError, logWarn } from "../logger.js";
-import { requestRadar, RadarHttpError, probeRadarPublicEndpoint, isRadarTokenValidFormat } from "./client.js";
+import { requestRadar, RadarHttpError, RadarRouteInvalidError, probeRadarPublicEndpoint, isRadarTokenValidFormat } from "./client.js";
 import {
   buildEndpointParams,
   DEFAULT_RADAR_ENDPOINT,
@@ -186,12 +186,15 @@ const parseRadarResponseErrors = (responseBody?: string): { message?: string; co
   }
 };
 
-const isRouteInvalidError = (errors?: { message?: string }[], responseBody?: string): boolean => {
+const isRouteInvalidError = (errors?: { message?: string; code?: number | string }[], responseBody?: string): boolean => {
   const message = errors?.[0]?.message ?? "";
   if (message.includes("No route for that URI")) {
     return true;
   }
-  return responseBody?.includes("No route for that URI") ?? false;
+  if (errors?.some((error) => Number(error?.code) === 7000)) {
+    return true;
+  }
+  return responseBody?.includes("No route for that URI") ?? responseBody?.includes("7000") ?? false;
 };
 
 const mapRadarError = (
@@ -203,7 +206,7 @@ const mapRadarError = (
 ): RadarFetchError => {
   const parsedErrors = parseRadarResponseErrors(responseBody);
   if (isRouteInvalidError(parsedErrors, responseBody)) {
-    return new RadarFetchError("RADAR_ROUTE_INVALID", "Radar API route invalid", {
+    return new RadarFetchError("RADAR_ROUTE_INVALID", "مسیر API اشتباه است (RADAR_ROUTE_INVALID). در حال اصلاح.", {
       status,
       endpoint: endpoint.path,
       params,
@@ -275,6 +278,22 @@ const fetchFromSource = async (
       });
       throw mapRadarError(error.status, endpoint, normalizedParams, error.responseBodyTrunc, error.modeUsed);
     }
+    if (error instanceof RadarRouteInvalidError) {
+      await logError("radar_route_invalid", {
+        status: 0,
+        url: error.url,
+        endpoint: error.endpoint,
+        params: error.params,
+        modeUsed: source,
+        dateRangePreset: config.dateRangePreset,
+      });
+      throw new RadarFetchError("RADAR_ROUTE_INVALID", "مسیر API اشتباه است (RADAR_ROUTE_INVALID). در حال اصلاح.", {
+        status: 0,
+        endpoint: error.endpoint,
+        params: error.params as RadarEndpointParams,
+        modeUsed: source,
+      });
+    }
     await logError("radar_fetch_failed", {
       status: 0,
       endpoint: endpoint.path,
@@ -305,7 +324,7 @@ const fetchFromSource = async (
     const responseBody = JSON.stringify(payload ?? "");
     const parsedErrors = payload.errors ?? parseRadarResponseErrors(responseBody);
     if (isRouteInvalidError(parsedErrors, responseBody)) {
-      throw new RadarFetchError("RADAR_ROUTE_INVALID", "Radar API route invalid", {
+      throw new RadarFetchError("RADAR_ROUTE_INVALID", "مسیر API اشتباه است (RADAR_ROUTE_INVALID). در حال اصلاح.", {
         status: 200,
         endpoint: endpoint.path,
         params: normalizedParams,
