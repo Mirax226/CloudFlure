@@ -29,13 +29,14 @@ export class RadarConfigError extends Error {
 const DATE_RANGE_ALIASES: Record<string, string> = {
   last_7_days: "7d",
   last_30_days: "30d",
+  "1y": "365d",
 };
 
-const ALLOWED_DATE_RANGES = new Set(["1d", "2d", "3d", "7d", "14d", "21d", "30d", "60d", "90d", "365d"]);
+const ALLOWED_DATE_RANGES = new Set(["1d", "2d", "3d", "7d", "14d", "21d", "30d", "60d", "90d", "365d", "1y"]);
 
 export const DEFAULT_RADAR_ENDPOINT: RadarEndpointDefinition = {
   name: "trafficCountries",
-  path: "/traffic/countries",
+  path: "/http/top/locations/http_protocol/HTTPS",
   label: "Top Countries",
   supportsPublic: true,
   requiredParams: ["dateRange"],

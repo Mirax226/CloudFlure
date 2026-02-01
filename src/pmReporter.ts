@@ -22,15 +22,17 @@ const REDACT_KEY_PATTERN = /(token|authorization|api[_-]?token|path[_-]?applier|
 let pmDisabledReason: string | null = null;
 
 const getPmConfig = () => {
-  const baseUrl = process.env.PM_BASE_URL?.trim() ?? "";
-  const token = process.env.PATH_APPLIER_TOKEN?.trim() ?? "";
-  const project = process.env.PM_PROJECT_NAME?.trim() ?? "cloudflare-radar-bot";
-  if (!baseUrl || !token) {
-    pmDisabledReason = !baseUrl ? "PM_BASE_URL missing" : "PATH_APPLIER_TOKEN missing";
-    return { enabled: false, baseUrl, token, project };
+  const endpoint =
+    process.env.PM_ENDPOINT?.trim() ??
+    (process.env.PM_BASE_URL ? `${process.env.PM_BASE_URL.replace(/\/$/, "")}/api/logs` : "");
+  const token = process.env.PM_BEARER_TOKEN?.trim() ?? process.env.PM_TOKEN?.trim() ?? "";
+  const project = process.env.PM_PROJECT?.trim() ?? "cloudflare-bot";
+  if (!endpoint || !token) {
+    pmDisabledReason = !endpoint ? "PM_ENDPOINT missing" : "PM_BEARER_TOKEN missing";
+    return { enabled: false, endpoint, token, project };
   }
   pmDisabledReason = null;
-  return { enabled: true, baseUrl, token, project };
+  return { enabled: true, endpoint, token, project };
 };
 
 export const getPmDisabledReason = (): string | null => pmDisabledReason;
@@ -113,7 +115,7 @@ const ensurePayloadSize = (payload: PMPayload): PMPayload => {
   };
 };
 
-const postPayload = async (url: string, payload: PMPayload, token: string): Promise<boolean> => {
+const postPayload = async (url: string, payload: PMPayload, token: string): Promise<number> => {
   const response = await axios.post(url, payload, {
     timeout: REQUEST_TIMEOUT_MS,
     headers: {
@@ -122,7 +124,7 @@ const postPayload = async (url: string, payload: PMPayload, token: string): Prom
     },
     validateStatus: () => true,
   });
-  return response.status >= 200 && response.status < 300;
+  return response.status;
 };
 
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -133,7 +135,7 @@ export const reportToPM = async (
   meta?: Record<string, unknown>,
   err?: unknown
 ): Promise<void> => {
-  const { enabled, baseUrl, token, project } = getPmConfig();
+  const { enabled, endpoint, token, project } = getPmConfig();
   if (!enabled) {
     console.warn("pm_report_skipped", { reason: pmDisabledReason, message });
     return;
@@ -152,16 +154,23 @@ export const reportToPM = async (
     meta: metaPayload,
   });
 
-  const url = `${baseUrl.replace(/\/$/, "")}/api/logs`;
-
   try {
-    const primaryOk = await postPayload(url, payload, token);
-    if (primaryOk) {
+    const status = await postPayload(endpoint, payload, token);
+    if (status >= 200 && status < 300) {
       return;
     }
-    await wait(RETRY_DELAY_MS);
-    await postPayload(url, payload, token);
+    if (status >= 500 || status === 0) {
+      await wait(RETRY_DELAY_MS);
+      await postPayload(endpoint, payload, token);
+    }
   } catch (error) {
-    console.error("pm_report_failed", { error: error instanceof Error ? error.message : String(error) });
+    try {
+      await wait(RETRY_DELAY_MS);
+      await postPayload(endpoint, payload, token);
+    } catch (retryError) {
+      console.error("pm_report_failed", {
+        error: retryError instanceof Error ? retryError.message : String(retryError),
+      });
+    }
   }
 };

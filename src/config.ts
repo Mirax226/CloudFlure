@@ -6,13 +6,13 @@ export type RadarMode = "public" | "token" | "auto";
 
 type EnvConfig = {
   botToken: string;
-  publicUrl: string | null;
+  publicUrl: string;
   defaultTimezone: string;
   screenshotCooldownSec: number;
   maxSendsPerTick: number;
   pm: {
     enabled: boolean;
-    baseUrl: string | null;
+    endpoint: string | null;
     token: string | null;
     projectName: string;
   };
@@ -66,14 +66,16 @@ const parseRadarMode = (value: string | undefined): RadarMode => {
 export const loadConfig = (): EnvConfig => {
   const botToken = requireEnv("BOT_TOKEN");
   requireEnv("DATABASE_URL");
-  const publicUrl = process.env.PUBLIC_URL ?? null;
+  const publicUrl = process.env.PUBLIC_URL?.trim() ?? "";
   const defaultTimezone = "Asia/Baku";
   const screenshotCooldownSec = parseNumberEnv("SCREENSHOT_COOLDOWN_SEC", 30);
   const maxSendsPerTick = parseNumberEnv("MAX_SENDS_PER_TICK", 20);
-  const pmBaseUrl = process.env.PM_BASE_URL ?? null;
-  const pmToken = process.env.PATH_APPLIER_TOKEN ?? null;
-  const pmProjectName = process.env.PM_PROJECT_NAME ?? "cloudflare-radar-bot";
-  const pmEnabled = Boolean(pmBaseUrl && pmToken && pmProjectName);
+  const pmEndpoint =
+    process.env.PM_ENDPOINT?.trim() ??
+    (process.env.PM_BASE_URL ? `${process.env.PM_BASE_URL.replace(/\/$/, "")}/api/logs` : null);
+  const pmToken = process.env.PM_BEARER_TOKEN?.trim() ?? process.env.PM_TOKEN?.trim() ?? null;
+  const pmProjectName = process.env.PM_PROJECT?.trim() ?? "cloudflare-bot";
+  const pmEnabled = Boolean(pmEndpoint && pmToken);
   const radarMode = parseRadarMode(process.env.RADAR_MODE);
   const radarApiToken = process.env.RADAR_API_TOKEN ?? null;
   const radarPublicBaseUrl = process.env.RADAR_PUBLIC_BASE_URL ?? "https://api.cloudflare.com/client/v4/radar";
@@ -90,7 +92,7 @@ export const loadConfig = (): EnvConfig => {
     maxSendsPerTick,
     pm: {
       enabled: pmEnabled,
-      baseUrl: pmBaseUrl,
+      endpoint: pmEndpoint,
       token: pmToken,
       projectName: pmProjectName,
     },

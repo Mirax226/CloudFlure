@@ -177,11 +177,14 @@ export const runSchedulerTick = async (
         where: { id: schedule.id },
         data: { inProgressUntil: lockUntil },
       });
+      let mode: RadarFetchConfig["mode"] | null = null;
+      let token: string | null = null;
+      let dateRangePreset: RadarFetchConfig["dateRangePreset"] | null = null;
       try {
         const settings = await getRadarSettings(prisma, schedule.targetChat.createdByUserId);
-        const mode = settings.radarMode ?? config.radar.mode;
-        const token = settings.radarApiToken ?? config.radar.apiToken;
-        const dateRangePreset = settings.radarDateRange ?? "D7";
+        mode = settings.radarMode ?? config.radar.mode;
+        token = settings.radarApiToken ?? config.radar.apiToken;
+        dateRangePreset = settings.radarDateRange ?? "D7";
         if (mode === "token" && !token) {
           await logError("scheduler_missing_radar_token", {
             scope: "scheduler_token_missing",
@@ -232,9 +235,24 @@ export const runSchedulerTick = async (
         await delay(200);
       } catch (error) {
         const errorCode = error instanceof RadarFetchError ? error.code : "CHART_RENDER_FAILED";
+        const responseBodyShort =
+          error instanceof RadarFetchError && error.responseBody ? error.responseBody.slice(0, 2000) : undefined;
+        const user = await prisma.user.findUnique({ where: { id: schedule.targetChat.createdByUserId } });
+        const tgUserId = user?.tgUserId ? Number(user.tgUserId) : null;
         await logError(
           "scheduler_send_failed",
-          { scope: "scheduler_send_failed", errorCode, targetChatId: schedule.targetChatId },
+          {
+            scope: "scheduler_send_failed",
+            errorCode,
+            targetChatId: schedule.targetChatId,
+            tgUserId,
+            mode,
+            endpoint: error instanceof RadarFetchError ? error.endpoint : undefined,
+            params: error instanceof RadarFetchError ? error.params : undefined,
+            status: error instanceof RadarFetchError ? error.status : undefined,
+            radarErrorCode: error instanceof RadarFetchError ? error.code : undefined,
+            responseBodyShort,
+          },
           error
         );
         await updateScheduleFailure(prisma, schedule.id, schedule.failCount ?? 0, sentAt);

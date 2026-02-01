@@ -72,15 +72,27 @@ const formatErrorCode = (status?: number): string => {
   return `RADAR_${status}`;
 };
 
+const buildRadarErrorMeta = (error: unknown) => {
+  if (!(error instanceof RadarFetchError)) {
+    return {};
+  }
+  const responseBodyShort = error.responseBody?.length ? error.responseBody.slice(0, 2000) : undefined;
+  return {
+    endpoint: error.endpoint,
+    params: error.params,
+    status: error.status,
+    radarErrorCode: error.code,
+    responseBodyShort,
+  };
+};
+
 const buildUserFacingError = (error: unknown, mode?: RadarMode): string => {
   if (error instanceof RadarConfigError) {
     return "خطای تنظیمات درخواست (400). کد خطا: RADAR_400";
   }
 
   if (error instanceof RadarFetchError) {
-    const responseBody = error.responseBody ?? "";
-    const hasRouteError = responseBody.includes("No route for that URI") || responseBody.includes("7000");
-    if (hasRouteError) {
+    if (error.code === "RADAR_ROUTE_INVALID") {
       return "مسیر API اشتباه است (RADAR_ROUTE_INVALID). در حال اصلاح.";
     }
     const code = formatErrorCode(error.status);
@@ -97,9 +109,10 @@ const buildUserFacingError = (error: unknown, mode?: RadarMode): string => {
       case "RADAR_BAD_REQUEST":
         return `خطای تنظیمات درخواست (400). کد خطا: ${code}`;
       case "RADAR_RATE_LIMIT":
-        return "محدودیت درخواست.";
+        return "محدودیت نرخ. کمی بعد دوباره امتحان کن.";
       case "RADAR_TIMEOUT":
       case "RADAR_UPSTREAM":
+        return "مشکل سمت سرویس.";
       case "RADAR_NETWORK":
         return "مشکل موقت سمت سرویس.";
       case "RADAR_INVALID_DATA":
@@ -172,7 +185,7 @@ export const createBot = (prisma: PrismaClient, config: EnvConfig, state: BotSta
       return;
     }
     if (state.inFlightByUserId.get(tgUserId)) {
-      await ctx.reply("در حال آماده‌سازی... کمی صبر کن ⏳");
+      await ctx.reply("در حال آماده‌سازی... ⏳");
       return;
     }
 
@@ -225,6 +238,7 @@ export const createBot = (prisma: PrismaClient, config: EnvConfig, state: BotSta
             tgUserId,
             mode,
             dateRangePreset,
+            ...buildRadarErrorMeta(error),
           },
           error
         );

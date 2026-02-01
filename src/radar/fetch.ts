@@ -38,7 +38,8 @@ export type RadarErrorCode =
   | "RADAR_INVALID_DATA"
   | "RADAR_EMPTY_DATA"
   | "RADAR_PUBLIC_UNSUPPORTED"
-  | "RADAR_TOKEN_MISSING";
+  | "RADAR_TOKEN_MISSING"
+  | "RADAR_ROUTE_INVALID";
 
 export class RadarFetchError extends Error {
   code: RadarErrorCode;
@@ -162,6 +163,37 @@ const buildRadarChartData = (
   return normalizeRecords(records, limit);
 };
 
+const extractResultPayload = (payload: unknown): unknown => {
+  if (!payload || typeof payload !== "object") {
+    return payload;
+  }
+  const record = payload as Record<string, unknown>;
+  if ("result" in record) {
+    return record.result;
+  }
+  return payload;
+};
+
+const parseRadarResponseErrors = (responseBody?: string): { message?: string; code?: number | string }[] | undefined => {
+  if (!responseBody) {
+    return undefined;
+  }
+  try {
+    const parsed = JSON.parse(responseBody) as { errors?: { message?: string; code?: number | string }[] };
+    return parsed.errors;
+  } catch {
+    return undefined;
+  }
+};
+
+const isRouteInvalidError = (errors?: { message?: string }[], responseBody?: string): boolean => {
+  const message = errors?.[0]?.message ?? "";
+  if (message.includes("No route for that URI")) {
+    return true;
+  }
+  return responseBody?.includes("No route for that URI") ?? false;
+};
+
 const mapRadarError = (
   status: number,
   endpoint: RadarEndpointDefinition,
@@ -169,6 +201,17 @@ const mapRadarError = (
   responseBody?: string,
   modeUsed?: "public" | "token"
 ): RadarFetchError => {
+  const parsedErrors = parseRadarResponseErrors(responseBody);
+  if (isRouteInvalidError(parsedErrors, responseBody)) {
+    return new RadarFetchError("RADAR_ROUTE_INVALID", "Radar API route invalid", {
+      status,
+      endpoint: endpoint.path,
+      params,
+      responseBody,
+      modeUsed,
+      errors: parsedErrors,
+    });
+  }
   const code: RadarErrorCode =
     status === 400
       ? "RADAR_BAD_REQUEST"
@@ -187,6 +230,7 @@ const mapRadarError = (
     params,
     responseBody,
     modeUsed,
+    errors: parsedErrors,
   });
 };
 
@@ -206,10 +250,10 @@ const fetchFromSource = async (
 
   const normalizedParams = buildEndpointParams({ ...params, ...dateRangeParams }, endpoint);
 
-  let response: { data: { success?: boolean; result?: unknown; errors?: { message?: string }[] } };
+  let response: { data: { success?: boolean; result?: unknown; errors?: { message?: string; code?: number | string }[] } };
   let modeUsed: "public" | "token" = source;
   try {
-    const result = await requestRadar<{ success?: boolean; result?: unknown; errors?: { message?: string }[] }>(
+    const result = await requestRadar<{ success?: boolean; result?: unknown; errors?: { message?: string; code?: number | string }[] }>(
       endpoint.path,
       normalizedParams,
       source,
@@ -247,31 +291,48 @@ const fetchFromSource = async (
   }
 
   const payload = response.data;
-  if (!payload || typeof payload.success !== "boolean") {
+  if (!payload) {
     throw new RadarFetchError("RADAR_INVALID_DATA", "Radar API returned invalid response", {
       status: 200,
       endpoint: endpoint.path,
       params: normalizedParams,
       modeUsed,
+      responseBody: JSON.stringify(payload ?? ""),
     });
   }
-  if (!payload.success) {
+  if (payload.success === false) {
     const summary = payload.errors?.[0]?.message ?? "Radar API responded with errors";
+    const responseBody = JSON.stringify(payload ?? "");
+    const parsedErrors = payload.errors ?? parseRadarResponseErrors(responseBody);
+    if (isRouteInvalidError(parsedErrors, responseBody)) {
+      throw new RadarFetchError("RADAR_ROUTE_INVALID", "Radar API route invalid", {
+        status: 200,
+        endpoint: endpoint.path,
+        params: normalizedParams,
+        modeUsed,
+        responseBody,
+        errors: parsedErrors,
+      });
+    }
     throw new RadarFetchError("RADAR_INVALID_DATA", summary, {
       status: 200,
       endpoint: endpoint.path,
       params: normalizedParams,
       modeUsed,
+      responseBody,
+      errors: parsedErrors,
     });
   }
 
-  const { labels, values } = buildRadarChartData(payload.result, normalizedParams.limit ?? endpoint.defaults.limit);
+  const resultPayload = extractResultPayload(payload);
+  const { labels, values } = buildRadarChartData(resultPayload, normalizedParams.limit ?? endpoint.defaults.limit);
   if (!validateRadarData(labels, values)) {
     throw new RadarFetchError("RADAR_EMPTY_DATA", "Radar API returned empty data", {
       status: 200,
       endpoint: endpoint.path,
       params: normalizedParams,
       modeUsed,
+      responseBody: JSON.stringify(payload ?? ""),
     });
   }
 
@@ -287,7 +348,10 @@ const fetchFromSource = async (
 };
 
 const isFallbackForPublic = (error: RadarFetchError): boolean => {
-  return error.code === "RADAR_BAD_REQUEST" || error.code === "RADAR_UNAUTHORIZED" || error.status === 404;
+  if (error.code === "RADAR_ROUTE_INVALID") {
+    return false;
+  }
+  return (error.status ?? 0) >= 400 && (error.status ?? 0) < 500;
 };
 
 export const fetchRadarData = async (

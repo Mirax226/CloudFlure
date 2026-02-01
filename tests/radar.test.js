@@ -47,18 +47,49 @@ test("auto mode falls back to public on 400", async () => {
   mocked.mock.restore();
 });
 
-test("auto mode does not fall back on 429", async () => {
-  const mocked = mock.method(axios, "get", async () => {
+test("auto mode falls back to public on 429", async () => {
+  const calls = [];
+  const mocked = mock.method(axios, "get", async (_url, options) => {
+    calls.push(options);
+    if (calls.length === 1) {
+      return {
+        status: 429,
+        data: { errors: [{ message: "rate limited" }] },
+      };
+    }
     return {
-      status: 429,
-      data: { errors: [{ message: "rate limited" }] },
+      status: 200,
+      data: {
+        success: true,
+        result: [{ name: "IR", value: 10 }],
+      },
+    };
+  });
+
+  const result = await fetchRadarData({ limit: 5 }, buildConfig());
+
+  assert.equal(result.source, "public");
+  assert.equal(calls.length, 2);
+
+  mocked.mock.restore();
+});
+
+test("auto mode does not fall back on route invalid", async () => {
+  const calls = [];
+  const mocked = mock.method(axios, "get", async (_url, options) => {
+    calls.push(options);
+    return {
+      status: 400,
+      data: { errors: [{ message: "No route for that URI" }] },
     };
   });
 
   await assert.rejects(
     () => fetchRadarData({ limit: 5 }, buildConfig()),
-    (error) => error instanceof RadarFetchError && error.code === "RADAR_RATE_LIMIT"
+    (error) => error instanceof RadarFetchError && error.code === "RADAR_ROUTE_INVALID"
   );
+
+  assert.equal(calls.length, 1);
 
   mocked.mock.restore();
 });
@@ -69,7 +100,7 @@ test("requestRadar returns data for public mode", async () => {
     data: { success: true, result: [{ name: "IR", value: 10 }] },
   }));
 
-  const result = await requestRadar("/traffic/countries", { dateRange: "7d", limit: 5 }, "public");
+  const result = await requestRadar("/http/top/locations/http_protocol/HTTPS", { dateRange: "7d", limit: 5 }, "public");
   assert.equal(result.meta.status, 200);
   assert.equal(result.meta.modeUsed, "public");
   assert.ok(result.data.success);
